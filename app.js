@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { FaceLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 import { buildTater, RealFace, CartoonFace, OneEuro, TOP } from './tater.js';
-import { SLOTS, ITEMS, DEFAULT_OUTFIT } from './wardrobe.js';
+import { SLOTS, ITEMS, DEFAULT_OUTFIT, CUSTOM } from './wardrobe.js';
 
 // ---------- Saved settings ----------
 const store = {
@@ -68,7 +68,7 @@ function disposeDeep(o) {
   o.traverse(n => {
     if (n.geometry) n.geometry.dispose();
     const mats = Array.isArray(n.material) ? n.material : n.material ? [n.material] : [];
-    for (const m of mats) { for (const k in m) if (m[k] && m[k].isTexture) m[k].dispose(); m.dispose(); }
+    for (const m of mats) { for (const k in m) if (m[k] && m[k].isTexture && !m[k].userData.shared) m[k].dispose(); m.dispose(); }
   });
 }
 function equip(slot, id) {
@@ -96,6 +96,30 @@ function renderWardrobe() {
 }
 wardrobeEl.addEventListener('click', e => { const b = e.target.closest('button.item'); if (b) { equip(b.dataset.slot, b.dataset.id); b.blur(); } });
 for (const s of SLOTS) equip(s.id, outfit[s.id]);
+
+// ---------- Your logos (cap + pouch tins) ----------
+function loadLogo(kind, src) {
+  return new Promise(res => {
+    const im = new Image();
+    im.onload = () => { const c = document.createElement('canvas'), s = Math.min(1, 512 / Math.max(im.width, im.height)); c.width = Math.max(1, Math.round(im.width * s)); c.height = Math.max(1, Math.round(im.height * s)); c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); CUSTOM[kind] = c; res(c); };
+    im.onerror = () => res(null); im.src = src;
+  });
+}
+function refreshLogoItems() { if (outfit.head === 'blackcap') equip('head', 'blackcap'); if (outfit.belt === 'pouchbelt') equip('belt', 'pouchbelt'); }
+for (const kind of ['cap', 'can']) {
+  const saved = store.get('logo.' + kind, null);
+  if (saved) loadLogo(kind, saved).then(refreshLogoItems);
+  const input = document.getElementById('logo-' + kind);
+  if (input) input.addEventListener('change', () => {
+    const f = input.files && input.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = async () => { const c = await loadLogo(kind, r.result); if (!c) { statusEl.textContent = 'That picture could not be opened. Try a PNG or JPG.'; return; } store.set('logo.' + kind, c.toDataURL('image/png')); refreshLogoItems(); statusEl.textContent = kind === 'cap' ? 'Cap logo updated.' : 'Tin lid design updated.'; };
+    r.readAsDataURL(f);
+  });
+}
+const clearLogos = document.getElementById('logo-clear');
+if (clearLogos) clearLogos.addEventListener('click', () => { CUSTOM.cap = CUSTOM.can = null; store.set('logo.cap', null); store.set('logo.can', null); refreshLogoItems(); statusEl.textContent = 'Back to the built-in designs.'; });
+
 
 // ---------- Steam ----------
 const steamTex = (() => {

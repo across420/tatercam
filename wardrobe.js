@@ -1152,19 +1152,282 @@ const TK_BACK = [
   { id: 'scav', name: '👜 Scav Sling Bag', build: () => backpack({ tex: () => checkTex('#5a4a3a', '#4a3a2a'), w: 0.5, h: 0.5, d: 0.25 }) },
 ];
 
+
+// ======================= HAIR v2: layered fur shells =======================
+// Dozens of stacked layers, each showing only the strands still "alive" at that height,
+// darker at the roots and sagging with gravity. Reads as soft, dense hair instead of spikes.
+let STRAND_TEX = null, STRAND_COL = null;
+function strandTexture() {
+  if (STRAND_TEX) return STRAND_TEX;
+  // dense grid of tapered strands: every cell holds one hair with a random length (brightness),
+  // jittered so it never looks like a grid
+  const N = 512, CELL = 5;
+  STRAND_TEX = canvasTex(N, N, (c, w, h) => {
+    const img = c.createImageData(w, h), cells = Math.floor(w / CELL);
+    const H = new Float32Array(cells * cells), JX = new Float32Array(cells * cells), JY = new Float32Array(cells * cells), R = new Float32Array(cells * cells);
+    for (let i = 0; i < H.length; i++) { H[i] = 0.15 + 0.85 * Math.pow(rnd(), 0.7); JX[i] = (rnd() - 0.5) * 0.6; JY[i] = (rnd() - 0.5) * 0.6; R[i] = 0.42 + rnd() * 0.25; }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const cx = x / CELL, cy = y / CELL, ix = Math.floor(cx), iy = Math.floor(cy); let best = 0;
+      for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+        const gx = (ix + ox + cells) % cells, gy = (iy + oy + cells) % cells, k = gy * cells + gx;
+        const px = ix + ox + 0.5 + JX[k], py = iy + oy + 0.5 + JY[k], d = Math.hypot(cx - px, cy - py) / R[k];
+        if (d < 1) best = Math.max(best, H[k] * (1 - d * d));
+      }
+      const o = (y * w + x) * 4, v = Math.round(best * 255); img.data[o] = img.data[o + 1] = img.data[o + 2] = v; img.data[o + 3] = 255;
+    }
+    c.putImageData(img, 0, 0);
+    // color: each strand a slightly different shade, with a lighter core
+    STRAND_COL = canvasTex(w, h, (c2) => {
+      const im2 = c2.createImageData(w, h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const ix = Math.floor(x / CELL) % cells, iy = Math.floor(y / CELL) % cells, k = iy * cells + ix, o = (y * w + x) * 4;
+        const shade = 0.62 + 0.38 * ((H[k] * 7.31) % 1), core = img.data[o] / 255;
+        const v = Math.round(255 * Math.min(1, shade * (0.8 + 0.3 * core)));
+        im2.data[o] = v; im2.data[o + 1] = v; im2.data[o + 2] = Math.round(v * 0.97); im2.data[o + 3] = 255;
+      }
+      c2.putImageData(im2, 0, 0);
+    });
+    STRAND_COL.userData.shared = true;
+  });
+  STRAND_TEX.colorSpace = THREE.NoColorSpace; STRAND_TEX.wrapS = STRAND_TEX.wrapT = THREE.RepeatWrapping;
+  STRAND_TEX.userData.shared = true;
+  return STRAND_TEX;
+}
+const sstep = (a, b, x) => smooth(a, b, x);
+// field(p, az) -> { m: 0..1 coverage, len: hair length } ; region = which part of the head to grid over
+function furShells({ field, palette, layers = 28, droop = 0.6, comb = null, density = 46, puff = 0.6, clump = 0.35, phiRange = [Math.PI / 2 - 2.3, Math.PI / 2 + 2.3], thetaRange = [0, Math.PI], res = [150, 110], lift = 0.004 }) {
+  const [nu, nv] = res, tex = strandTexture();
+  const base = [], nrm = [], mask = [], lens = [], uvs = [], idx = [];
+  for (let j = 0; j <= nv; j++) for (let i = 0; i <= nu; i++) {
+    const phi = phiRange[0] + (phiRange[1] - phiRange[0]) * i / nu, th = thetaRange[0] + (thetaRange[1] - thetaRange[0]) * j / nv;
+    const d = dirAt(th, phi), p = outerPoint(d), n = shapeNormal(d, SMOOTH), az = Math.atan2(p.x, p.z);
+    const f = field(p, az) || { m: 0, len: 0 };
+    base.push(p); nrm.push(n); mask.push(f.m); lens.push(f.len || 0);
+    uvs.push(phi * 0.42 * density / 10, (Math.cos(th)) * 0.55 * density / 10);
+  }
+  for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) {
+    const a = j * (nu + 1) + i, b = a + nu + 1;
+    if (Math.max(mask[a], mask[a + 1], mask[b], mask[b + 1]) <= 0.001) continue;
+    idx.push(a, b, a + 1, b, b + 1, a + 1);
+  }
+  const g = new THREE.Group(), meshes = [];
+  const root = new THREE.Color(palette[0]).multiplyScalar(0.45), tip = new THREE.Color(palette[palette.length - 1]);
+  const down = new THREE.Vector3(0, -1, 0), tmp = new THREE.Vector3(), c = new THREE.Color();
+  for (let L = 0; L < layers; L++) {
+    const t = (L + 1) / layers, pos = new Float32Array(base.length * 3), col = new Float32Array(base.length * 4);
+    for (let k = 0; k < base.length; k++) {
+      const len = lens[k] * mask[k] ** 0.5, n = nrm[k];
+      tmp.copy(base[k]).addScaledVector(n, lift + len * t * puff);
+      const dir = comb ? comb(base[k], n) : down;
+      tmp.addScaledVector(dir, Math.min(len * droop * t * t, 0.2 + len * 0.5));
+      if (clump) {   // hair gathers into loose locks and waves instead of a perfect sheet
+        const b = base[k], q = clump * len * t;
+        tmp.x += (vnoise(b.x * 7 + 1, b.y * 7, b.z * 7) - 0.5) * q + (vnoise(b.x * 19 + 4, b.y * 19, b.z * 19) - 0.5) * q * 0.4;
+        tmp.y += (vnoise(b.x * 7 + 9, b.y * 7, b.z * 7) - 0.5) * q * 0.6;
+        tmp.z += (vnoise(b.x * 7 + 17, b.y * 7, b.z * 7) - 0.5) * q;
+      }
+      pos[k * 3] = tmp.x; pos[k * 3 + 1] = tmp.y; pos[k * 3 + 2] = tmp.z;
+      c.copy(root).lerp(tip, Math.pow(t, 0.8));
+      col[k * 4] = c.r; col[k * 4 + 1] = c.g; col[k * 4 + 2] = c.b; col[k * 4 + 3] = Math.min(1, mask[k] * 1.6) * (L === 0 ? 1 : 1);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3)); geo.setAttribute('color', new THREE.BufferAttribute(col, 4));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2)); geo.setIndex(idx); geo.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, map: STRAND_COL, alphaMap: L === 0 ? null : tex, alphaTest: L === 0 ? 0.5 : Math.min(0.97, 0.08 + Math.pow(t, 1.05) * 0.9), roughness: 0.62, metalness: 0, side: THREE.DoubleSide, envMapIntensity: 0.4 });
+    const m = new THREE.Mesh(geo, mat); m.renderOrder = 2; g.add(m); meshes.push(m);
+  }
+  return { group: g, meshes };
+}
+// smooth coverage helpers
+const soft = (v, edge = 0.04) => sstep(-edge, edge, v);   // v > 0 inside
+const mouthHole = (x, y) => Math.hypot(x / (MOUTH.rx + 0.02), (y - FACE.mouthY) / (MOUTH.ry + 0.02)) - 1;
+function beardField({ len, under = 0, chinY = FACE.mouthY - 0.62, stache = true, sides = true }) {
+  return (p, az) => {
+    const A = Math.abs(az); if (A > 2.15) return null;
+    const u = Math.abs(p.x), side = sstep(0.55, 1.5, A);
+    // top edge: sideburns at the sides, a dip under the cheeks, the mustache line in the middle
+    const top = lerpN(u < 0.33 ? FACE.mouthY + 0.2 - 0.05 * sstep(0, 0.33, u) : FACE.mouthY + 0.09, FACE.eyeY - 0.02, sides ? side : 0) + jag(p.x, p.y, 0.02);
+    let m = soft(top - p.y, 0.035) * soft(mouthHole(p.x, p.y), 0.04);
+    if (!stache && p.y > FACE.mouthY && u < 0.35) m *= soft(-(p.y - FACE.mouthY - 0.02), 0.03);
+    if (!sides) m *= soft(2.1 - A - 0.5, 0.1);
+    m *= soft(p.y - (chinY - 0.4), 0.05);
+    if (m <= 0.001) return null;
+    return { m, len: len(p, az) };
+  };
+}
+function beardItem(id, name, pal, opts) {
+  return { id, name, build() {
+    const g = new THREE.Group(), sway = new THREE.Group(); sway.position.set(0, FACE.mouthY, 0.3); g.add(sway);
+    const fur = furShells({ field: beardField(opts), palette: HAIR[pal], layers: opts.layers || 30, droop: opts.droop ?? 0.9, density: opts.density || 50, puff: opts.puff ?? 0.8, clump: opts.clump ?? 0.45,
+      phiRange: [Math.PI / 2 - 2.2, Math.PI / 2 + 2.2], thetaRange: [Math.acos(Math.min(1, (FACE.eyeY + 0.05) / TOP)), Math.PI * 0.97],
+      comb: (b, n) => tmpV.set(0, -1, 0).addScaledVector(n, opts.forward ?? 0.35).normalize() });
+    fur.group.position.set(0, -FACE.mouthY, -0.3); sway.add(fur.group);
+    const sx = spring(35, 4), sz = spring(35, 4); let pj = 0;
+    return { obj: g, update(st) {
+      sway.rotation.x = sx.step(st.dt, 0, -st.drot.x * 0.012 + (st.jaw - pj) * 0.5 + st.kick * 0.05);
+      sway.rotation.z = sz.step(st.dt, 0, -st.drot.z * 0.012 - st.drot.y * 0.006); pj = st.jaw;
+    } };
+  } };
+}
+const tmpV = new THREE.Vector3();
+const chinGrow = (start, full, extra) => (p) => start + extra * sstep(FACE.mouthY - 0.02, FACE.mouthY - full, p.y);
+const BEARDS2 = [
+  beardItem('hutch', '🧔‍♂️ The Hutch (big full beard)', 'brown', { len: (p, az) => chinGrow(0.13, 0.42, 0.42)(p) * (1 - 0.2 * sstep(0.9, 1.9, Math.abs(az))), droop: 1.0, forward: 0.6, puff: 1.2, clump: 0.6, layers: 40 }),
+  beardItem('fullbeard', '🧔 Full Beard', 'brown', { len: (p) => chinGrow(0.09, 0.4, 0.18)(p), droop: 0.8 }),
+  beardItem('lumberjack', '🪓 Lumberjack Beard (ginger)', 'ginger', { len: (p) => chinGrow(0.12, 0.45, 0.3)(p), droop: 1.0, forward: 0.4 }),
+  beardItem('wizard', '🧙 Long Grey Beard', 'grey', { len: (p) => chinGrow(0.1, 0.4, 0.75)(p), droop: 1.7, forward: 0.25, layers: 40 }),
+  beardItem('blackbeard', '🏴‍☠️ Black Beard', 'black', { len: (p) => chinGrow(0.1, 0.4, 0.38)(p), droop: 1.1, forward: 0.4 }),
+  beardItem('stubble', '🪒 Stubble', 'black', { len: () => 0.025, droop: 0.1, layers: 10, density: 80 }),
+  { id: 'goatee', name: '🐐 Goatee', build() {
+    const field = (p, az) => { if (Math.abs(az) > 0.9) return null; const u = Math.abs(p.x) + jag(p.x, p.y, 0.015), w = p.y - FACE.mouthY;
+      const stache = soft(0.27 - 0.08 * sstep(0.08, 0.19, w) - u, 0.025) * soft(w - 0.08, 0.02) * soft(0.2 - w, 0.02);
+      const chin = soft(0.24 * Math.sqrt(Math.max(0, 1 - ((w + 0.18) / 0.32) ** 2)) - u, 0.025) * soft(0.02 - w, 0.02);
+      const link = soft(u - 0.19, 0.015) * soft(0.27 - u, 0.015) * soft(0.09 - w, 0.02) * soft(w, 0.02);
+      const m = Math.max(stache, chin, link) * soft(mouthHole(p.x, p.y), 0.03); return m > 0.001 ? { m, len: 0.06 + 0.12 * sstep(FACE.mouthY - 0.08, FACE.mouthY - 0.45, p.y) } : null; };
+    const fur = furShells({ field, palette: HAIR.brown, layers: 26, droop: 0.9, phiRange: [Math.PI / 2 - 1, Math.PI / 2 + 1], thetaRange: [Math.acos((FACE.mouthY + 0.25) / TOP), Math.acos((FACE.mouthY - 0.6) / TOP)], res: [80, 60] });
+    return { obj: fur.group, update() {} };
+  } },
+];
+function stacheItem(id, name, pal, shape, { len = 0.07, tips = false, droop = 0.6 } = {}) {
+  return { id, name, build() {
+    const field = (p, az) => { if (Math.abs(az) > 1) return null; const w = p.y - FACE.mouthY; const m = shape(p.x + jag(p.x, p.y, 0.01), w) * (w > 0.075 || Math.abs(p.x) > 0.22 ? 1 : soft(mouthHole(p.x, p.y), 0.02)); return m > 0.001 ? { m, len } : null; };
+    const fur = furShells({ field, palette: HAIR[pal], layers: 22, droop, density: 60, phiRange: [Math.PI / 2 - 0.9, Math.PI / 2 + 0.9], thetaRange: [Math.acos((FACE.mouthY + 0.32) / TOP), Math.acos((FACE.mouthY - 0.5) / TOP)], res: [90, 70],
+      comb: (b, n) => tmpV.set(Math.sign(b.x) * 0.7, -1, 0).addScaledVector(n, 0.2).normalize() });
+    const g = new THREE.Group(); g.add(fur.group);
+    if (tips) for (const sx of [-1, 1]) g.add(stacheTip(sx, HAIR[pal], 3.6));
+    const tw = spring(120, 7); let pj = 0;
+    return { obj: g, update(st) { const x = tw.step(st.dt, 0, (st.jaw - pj) * 2); pj = st.jaw; g.position.y = x * 0.02; g.scale.x = 1 + x * 0.05; } };
+  } };
+}
+const STACHES2 = [
+  stacheItem('chevron', '🥸 Chevron', 'brown', (u, w) => soft(0.3 - 0.07 * sstep(0.09, 0.21, w) - Math.abs(u), 0.03) * soft(w - 0.085, 0.02) * soft(0.215 - w, 0.02), { len: 0.08 }),
+  stacheItem('pencil', '✏️ Pencil Mustache', 'black', (u, w) => soft(0.25 - Math.abs(u), 0.02) * soft(Math.abs(u) - 0.02, 0.01) * soft(w - 0.1, 0.012) * soft(0.135 - w, 0.012), { len: 0.03, droop: 0.2 }),
+  stacheItem('horseshoe', '🐴 Horseshoe', 'blonde', (u, w) => { const a = Math.abs(u); const top = soft(0.3 - a, 0.025) * soft(w - 0.09, 0.02) * soft(0.2 - w, 0.02); const bars = soft(a - 0.23, 0.02) * soft(0.32 - a, 0.02) * soft(w + 0.42, 0.03) * soft(0.2 - w, 0.02); return Math.max(top, bars); }, { len: 0.08 }),
+  stacheItem('handlebar', '🎩 Handlebar', 'brown', (u, w) => soft(0.24 - Math.abs(u), 0.025) * soft(w - 0.095, 0.02) * soft(0.18 - 0.04 * Math.abs(u) / 0.24 - w, 0.02), { len: 0.07, tips: true }),
+  stacheItem('walrus', '🦭 Walrus', 'grey', (u, w) => soft(0.34 - 0.06 * sstep(0.06, 0.24, w) - Math.abs(u), 0.03) * soft(w - 0.05, 0.02) * soft(0.245 - w, 0.02), { len: 0.16, droop: 1.1 }),
+];
+function mullet2(pal, { length = 0.75, curly = 0, rattail = false } = {}) {
+  const palette = HAIR[pal], hairline = FACE.eyeY + 0.32;
+  const field = (p, az) => {
+    const A = Math.abs(az), u = Math.abs(p.x);
+    const line = hairline - 0.1 * (u / 0.6) ** 2 + 0.06 * Math.exp(-(((u - 0.38) / 0.1) ** 2)) + jag(p.x, p.y, 0.02);
+    const frontM = soft(p.y - line, 0.03);
+    const sideM = soft(p.y - (FACE.eyeY + 0.05), 0.04);                 // short above the ears
+    const backM = soft(p.y - (FACE.mouthY - 0.2), 0.05);                // long down the back
+    const wF = 1 - sstep(0.9, 1.3, A), wB = sstep(1.7, 2.2, A), wS = 1 - wF - wB;
+    const m = frontM * wF + sideM * Math.max(0, wS) + backM * wB;
+    if (m <= 0.001) return null;
+    const len = 0.13 + 0.07 * curly + wB * length * (0.4 + 0.6 * sstep(FACE.eyeY + 0.1, FACE.mouthY - 0.1, p.y));
+    return { m: Math.min(1, m), len };
+  };
+  const fur = furShells({ field, palette, layers: 34, droop: 1.0, density: 44, res: [180, 120], puff: 0.9, clump: 0.7 + curly * 0.6, phiRange: [-Math.PI, Math.PI], thetaRange: [0, Math.acos((FACE.mouthY - 0.3) / TOP)],
+    comb: (b, n) => { const back = tmpV.set(0, 0.15, -1); back.addScaledVector(n, -n.dot(back)); if (b.z < -0.2 && b.y < FACE.eyeY + 0.2) back.set(0, -1, -0.15); return back.normalize(); } });
+  const g = new THREE.Group(); g.add(fur.group);
+  if (rattail) {
+    const pts = []; for (let i = 0; i <= 10; i++) pts.push(ringPoint(FACE.mouthY - 0.15 - i * 0.09, Math.PI, 0.03 + i * 0.012));
+    const geo = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 40, 0.035, 8); g.add(new THREE.Mesh(geo, std(new THREE.Color(palette[0]), { roughness: 0.6 })));
+  }
+  const sx = spring(22, 2.6), sz = spring(22, 2.6);
+  return { obj: g, update(st) { const x = sx.step(st.dt, 0, -st.drot.x * 0.03 + st.kick * 0.25), z = sz.step(st.dt, 0, -st.drot.z * 0.03 - st.drot.y * 0.015);
+    fur.meshes.forEach((m, i) => { const t = i / fur.meshes.length; m.rotation.x = x * 0.06 * t * t; m.rotation.z = z * 0.06 * t * t; }); } };
+}
+const HAIRDOS2 = [
+  { id: 'mullet', name: '🦅 Classic Mullet', build: () => mullet2('brown') },
+  { id: 'mullet80s', name: '🎸 80s Blonde Mullet', build: () => mullet2('blonde', { curly: 1, length: 0.85 }) },
+  { id: 'gingermullet', name: '🔥 Ginger Mullet', build: () => mullet2('ginger', { length: 0.7 }) },
+  { id: 'joedirt', name: '🧢 Dirty Mullet + Rat Tail', build: () => mullet2('dirty', { length: 0.55, rattail: true }) },
+  { id: 'blackmullet', name: '🖤 Black Mullet', build: () => mullet2('black', { length: 0.9 }) },
+  { id: 'buzz', name: '💈 Buzz Cut', build: () => { const hairline = FACE.eyeY + 0.3; const f = furShells({ field: (p, az) => { const A = Math.abs(az); const m = A < 1.2 ? soft(p.y - hairline + 0.08 * (Math.abs(p.x) / 0.6) ** 2, 0.03) : soft(p.y - (FACE.eyeY - 0.05), 0.04); return m > 0.001 ? { m, len: 0.03 } : null; }, palette: HAIR.brown, layers: 12, droop: 0.1, density: 80, res: [160, 90], phiRange: [-Math.PI, Math.PI], thetaRange: [0, Math.acos((FACE.eyeY - 0.2) / TOP)] }); return { obj: f.group, update() {} }; } },
+];
+
+// ======================= LOGO GEAR =======================
+// Pictures you upload in the wardrobe replace the built-in designs.
+export const CUSTOM = { cap: null, can: null };
+const CAN_TINTS = ['#7fd6c4', '#7fb7e8', '#9fe07a', '#e8c46a', '#e88a8a', '#b79be8'];
+function canLidTexture(tint) {
+  return canvasTex(256, 256, (c, w, h) => {
+    c.fillStyle = '#121314'; c.fillRect(0, 0, w, h);
+    if (CUSTOM.can) { c.save(); c.beginPath(); c.arc(w / 2, h / 2, w * 0.47, 0, TAU); c.clip(); const im = CUSTOM.can, s = Math.max(w / im.width, h / im.height); c.drawImage(im, (w - im.width * s) / 2, (h - im.height * s) / 2, im.width * s, im.height * s); c.restore(); return; }
+    // built-in design: a tater-themed tin
+    c.fillStyle = '#f4f2ec'; c.beginPath(); c.arc(w / 2, h / 2, w * 0.42, 0, TAU); c.fill();
+    const gr = c.createLinearGradient(0, h * 0.12, 0, h * 0.42); gr.addColorStop(0, tint); gr.addColorStop(1, '#f4f2ec');
+    c.fillStyle = gr; c.beginPath(); c.arc(w / 2, h / 2, w * 0.42, Math.PI * 1.08, Math.PI * 1.92); c.fill();
+    c.fillStyle = '#121314'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.font = 'bold 30px Arial Black, Impact, sans-serif'; c.fillText('TATER', w / 2, h * 0.47);
+    c.font = 'bold 15px Arial, sans-serif'; c.fillText('POUCHES', w / 2, h * 0.6);
+    c.fillStyle = '#121314'; c.fillRect(w * 0.18, h * 0.68, w * 0.64, h * 0.12);
+    c.fillStyle = '#f4f2ec'; c.font = 'bold 11px Arial, sans-serif'; c.fillText('20 PER TIN', w / 2, h * 0.74);
+  });
+}
+function capLogoTexture() {
+  return canvasTex(512, 256, (c, w, h) => {
+    c.clearRect(0, 0, w, h);
+    if (CUSTOM.cap) { const im = CUSTOM.cap, s = Math.min(w / im.width, h / im.height) * 0.95; c.drawImage(im, (w - im.width * s) / 2, (h - im.height * s) / 2, im.width * s, im.height * s); return; }
+    c.fillStyle = '#ffffff'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.font = 'bold 120px Arial Black, Impact, sans-serif'; c.fillText('MGAS', w / 2, h / 2 + 6);
+  });
+}
+const LOGO_HEAD = [
+  { id: 'blackcap', name: '🧢 Black Cap (your logo)', build() {
+    const g = new THREE.Group(); const blk = std(0x151617, { roughness: 0.9, side: THREE.DoubleSide });
+    const K = 1.07, th = eyeTheta - 0.3; g.add(shell(K, th, blk));
+    for (let i = 0; i < 6; i++) { const pts = []; for (let k = 0; k <= 16; k++) pts.push(outerPoint(dirAt(k / 16 * th, i / 6 * TAU + Math.PI / 6)).multiplyScalar(K + 0.005)); g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 24, 0.008, 5), std(0x0a0a0a, { roughness: 1 }))); }
+    const btn = new THREE.Mesh(new THREE.SphereGeometry(0.05, 14, 10), blk); btn.position.y = TOP * K; btn.scale.y = 0.5; g.add(btn);
+    g.add(ring(K, th, 0.022, std(0x0e0e0e, { roughness: 1 })));
+    // bill: sticks out over the eyes, bends down at the sides
+    const e = outerPoint(dirAt(th, Math.PI / 2)).multiplyScalar(K);
+    const billGeo = new THREE.CircleGeometry(0.58, 48, 0, Math.PI), bp = billGeo.attributes.position;
+    for (let i = 0; i < bp.count; i++) { const x = bp.getX(i), y = bp.getY(i); bp.setY(i, y * 0.8); bp.setZ(i, 0.16 * (x / 0.58) ** 2); }
+    billGeo.computeVertexNormals();
+    const bill = new THREE.Mesh(billGeo, std(0x1a1b1c, { roughness: 0.85, side: THREE.DoubleSide })); bill.rotation.x = Math.PI / 2 - 0.28; bill.position.set(0, e.y + 0.005, e.z - 0.16); g.add(bill);
+    const billEdge = new THREE.Mesh(new THREE.TorusGeometry(0.58, 0.012, 6, 48, Math.PI), std(0x0e0e0e)); billEdge.rotation.copy(bill.rotation); billEdge.position.copy(bill.position); billEdge.scale.set(1, 0.8, 1); g.add(billEdge);
+    // logo on the front panel, sitting on the crown and bent to its curve
+    const fy = e.y + (TOP * K - e.y) * 0.38;
+    const s0 = surfaceAt(0, fy / K, SMOOTH), fp = s0.p.multiplyScalar(K), fn = s0.n;
+    const logoGeo = new THREE.PlaneGeometry(0.6, 0.3, 24, 6), lp = logoGeo.attributes.position;
+    for (let i = 0; i < lp.count; i++) { const x = lp.getX(i); lp.setZ(i, -0.75 * x * x); }
+    logoGeo.computeVertexNormals();
+    const logo = new THREE.Mesh(logoGeo, new THREE.MeshStandardMaterial({ map: capLogoTexture(), transparent: true, alphaTest: 0.05, roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -2 }));
+    logo.position.copy(fp).addScaledVector(fn, 0.03); logo.quaternion.setFromUnitVectors(Z, fn); g.add(logo);
+    return { obj: g, update() {} };
+  } },
+];
+const LOGO_BELT = [
+  { id: 'pouchbelt', name: '🥫 Pouch Tin Ammo Belt', build() {
+    const g = new THREE.Group(), y = -0.86;
+    const nylon = std(0x1d1e1c, { roughness: 0.95 }), metal = std(0x9a9ea2, { metalness: 0.9, roughness: 0.3 });
+    g.add(band(y - 0.09, y + 0.09, 0.05, nylon));
+    const buckle = box(0.24, 0.17, 0.04, metal, 0, y, ringPoint(y, 0, 0.08).z, g);
+    const tins = [], N = 10;
+    for (let i = 0; i < N; i++) {
+      const a = (i - (N - 1) / 2) * 0.36; if (Math.abs(a) < 0.2) continue;       // gap at the buckle
+      const p = ringPoint(y, a, 0.1), out = new THREE.Vector3(p.x, 0, p.z).normalize();
+      const holder = new THREE.Group(); holder.position.copy(p); holder.lookAt(p.clone().add(out)); g.add(holder);
+      const clip = box(0.3, 0.34, 0.02, nylon, 0, 0.02, -0.03, holder);          // the belt loop it hangs from
+      const strap = box(0.06, 0.36, 0.025, nylon, 0, 0.02, 0.06, holder);         // retaining strap across the tin
+      const tin = new THREE.Group(); tin.position.set(0, -0.01, 0.02); holder.add(tin);
+      const lidMat = new THREE.MeshStandardMaterial({ map: canLidTexture(CAN_TINTS[i % CAN_TINTS.length]), roughness: 0.45 });
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.145, 0.145, 0.065, 40), [std(0x151617, { roughness: 0.4 }), lidMat, std(0x151617)]);
+      body.rotation.x = Math.PI / 2; tin.add(body);
+      const rim = new THREE.Mesh(new THREE.TorusGeometry(0.143, 0.009, 6, 40), std(0x0d0d0d, { roughness: 0.3 })); rim.position.z = 0.033; tin.add(rim);
+      tins.push({ tin, s: spring(90, 6), i });
+    }
+    return { obj: g, update(st) { for (const t of tins) t.tin.rotation.x = t.s.step(st.dt, 0, -st.drot.x * 0.02 + st.kick * (0.2 + 0.05 * (t.i % 3))); } };
+  } },
+];
 const NECK_IDS = ['chain', 'bowtie', 'scarf'];
 export const SLOTS = [
   { id: 'hair', name: 'Hair', anchor: 'head' }, { id: 'head', name: 'Head', anchor: 'head' }, { id: 'beard', name: 'Beard', anchor: 'head' },
   { id: 'stache', name: 'Mustache', anchor: 'head' }, { id: 'face', name: 'Face', anchor: 'head' },
   { id: 'eyes', name: 'Eyewear', anchor: 'head' }, { id: 'ears', name: 'Ears', anchor: 'head' },
-  { id: 'neck', name: 'Neck', anchor: 'waist' }, { id: 'body', name: 'Body', anchor: 'waist' }, { id: 'back', name: 'Back', anchor: 'waist' }
+  { id: 'neck', name: 'Neck', anchor: 'waist' }, { id: 'body', name: 'Body', anchor: 'waist' }, { id: 'belt', name: 'Belt', anchor: 'hip' }, { id: 'back', name: 'Back', anchor: 'waist' }
 ];
 export const ITEMS = [
-  ...HAIRDOS.map(i => ({ ...i, slot: 'hair' })), ...BEARDS.map(i => ({ ...i, slot: 'beard' })), ...STACHES.map(i => ({ ...i, slot: 'stache' })),
-  ...[...MIL_HEAD, ...TK_HEAD, ...HEAD].map(i => ({ ...i, slot: 'head' })), ...[...MIL_FACE, ...TK_FACE].map(i => ({ ...i, slot: 'face' })),
+  ...HAIRDOS2.map(i => ({ ...i, slot: 'hair' })), ...BEARDS2.map(i => ({ ...i, slot: 'beard' })), ...STACHES2.map(i => ({ ...i, slot: 'stache' })),
+  ...[...MIL_HEAD, ...TK_HEAD, ...LOGO_HEAD, ...HEAD].map(i => ({ ...i, slot: 'head' })), ...[...MIL_FACE, ...TK_FACE].map(i => ({ ...i, slot: 'face' })),
   ...[...EYES, ...MIL_EYES, ...TK_EYES].map(i => ({ ...i, slot: 'eyes' })), ...[...EARS, ...TK_EARS].map(i => ({ ...i, slot: 'ears' })),
   ...[...BODY.filter(i => NECK_IDS.includes(i.id)), ...MIL_NECK, ...TK_NECK].map(i => ({ ...i, slot: 'neck' })),
   ...[...BODY.filter(i => !NECK_IDS.includes(i.id)), ...MIL_BODY, ...TK_BODY].map(i => ({ ...i, slot: 'body' })),
-  ...[...MIL_BACK, ...TK_BACK].map(i => ({ ...i, slot: 'back' }))
+  ...[...MIL_BACK, ...TK_BACK].map(i => ({ ...i, slot: 'back' })), ...LOGO_BELT.map(i => ({ ...i, slot: 'belt' }))
 ];
-export const DEFAULT_OUTFIT = { hair: 'none', beard: 'none', stache: 'none', head: 'none', face: 'none', eyes: 'none', ears: 'none', neck: 'none', body: 'none', back: 'none' };
+export const DEFAULT_OUTFIT = { hair: 'none', beard: 'none', stache: 'none', head: 'none', face: 'none', eyes: 'none', ears: 'none', neck: 'none', body: 'none', belt: 'none', back: 'none' };
