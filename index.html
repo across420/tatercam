@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#121216">
+<title>TaterCam</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #00ff00; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+  canvas { display: block; }
+  .panel {
+    position: fixed; top: 12px; z-index: 5;
+    background: rgba(18,18,22,.92); color: #f2f2f2;
+    border-radius: 12px; font-size: 13px; line-height: 1.55; box-shadow: 0 6px 24px rgba(0,0,0,.35);
+  }
+  #ui { left: 12px; width: 280px; padding: 14px 16px; }
+  #ui h1, #wardrobe h2 { font-size: 15px; margin: 0 0 6px; }
+  #ui button, #ui select { width: 100%; margin: 6px 0; padding: 8px; border: 0; border-radius: 8px; font-size: 13px; }
+  #ui button { background: #f0b84a; color: #2a1a05; font-weight: 700; cursor: pointer; }
+  #ui button:disabled { opacity: .6; cursor: default; }
+  #ui select { background: #2c2c34; color: #fff; }
+  #ui label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 4px 0; color: #ccc; }
+  #ui input[type=range] { width: 140px; accent-color: #f0b84a; }
+  #status { color: #ffd98a; }
+  .row { display: flex; gap: 6px; }
+  kbd { background: #333; border-radius: 4px; padding: 0 5px; font-family: inherit; }
+  #keys { margin-top: 6px; color: #ddd; }
+  hr { border: 0; border-top: 1px solid #333; margin: 10px 0; }
+  #wardrobe { right: 12px; width: 300px; max-height: calc(100% - 230px); display: flex; flex-direction: column; padding: 14px 12px 10px 16px; }
+  #wardrobe .hint { color: #999; margin-bottom: 6px; }
+  #wardrobeList { overflow-y: auto; padding-right: 4px; }
+  .slot { margin-bottom: 10px; }
+  .slotName { font-weight: 700; color: #f0b84a; text-transform: uppercase; letter-spacing: .06em; font-size: 11px; margin-bottom: 4px; }
+  .items { display: flex; flex-wrap: wrap; gap: 5px; }
+  button.item { border: 1px solid #3a3a44; background: #26262e; color: #eee; border-radius: 7px; padding: 5px 8px; font-size: 12px; cursor: pointer; }
+  button.item:hover { border-color: #f0b84a; }
+  button.item.on { background: #f0b84a; color: #2a1a05; border-color: #f0b84a; font-weight: 700; }
+  #preview {
+    position: fixed; bottom: 12px; right: 12px; width: 180px; border-radius: 10px;
+    transform: scaleX(-1); opacity: .9; z-index: 6; box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  }
+  html, body { overscroll-behavior: none; touch-action: manipulation; }
+  #touch { position: fixed; left: 8px; right: 8px; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); z-index: 7;
+    display: flex; gap: 6px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; width: max-content; max-width: calc(100% - 16px); margin: 0 auto;
+    background: rgba(18,18,22,.85); padding: 8px; border-radius: 14px; }
+  #touch button { flex: 0 0 auto; border: 0; border-radius: 10px; background: #2c2c34; color: #fff; font-size: 13px; padding: 9px 11px; cursor: pointer; }
+  #touch button.main { background: #f0b84a; color: #2a1a05; font-weight: 700; }
+  @media (max-width: 700px) {
+    .panel { top: calc(8px + env(safe-area-inset-top, 0px)); }
+    #ui { left: 8px; right: 8px; width: auto; padding: 10px 12px; font-size: 12px; }
+    #ui #keys { display: none; }
+    #ui input[type=range] { width: 120px; }
+    #wardrobe { left: 8px; right: 8px; width: auto; top: auto; bottom: calc(70px + env(safe-area-inset-bottom, 0px)); max-height: 45%; }
+    #preview { width: 96px; bottom: auto; top: calc(8px + env(safe-area-inset-top, 0px)); right: 8px; z-index: 8; }
+  }
+  .hidden { display: none !important; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="ui" class="panel">
+  <h1>🥔 TaterCam</h1>
+  <div id="status">Loading…</div>
+  <div class="row">
+    <select id="camSelect" style="flex:1;min-width:0"><option value="">Looking for cameras…</option></select>
+    <button id="refresh" title="Find cameras again" style="width:auto;padding:8px 10px;background:#2c2c34;color:#fff">Refresh</button>
+  </div>
+  <button id="start">Start camera</button>
+  <hr>
+  <label>Face <select id="faceStyle" style="width:150px;margin:0">
+    <option value="real">My eyes &amp; mouth</option>
+    <option value="cartoon">Cartoon</option>
+  </select></label>
+  <label>Potato tint <input id="tint" type="range" min="0" max="0.9" step="0.05"></label>
+  <label>Feature size <input id="featSize" type="range" min="0.7" max="1.4" step="0.05"></label>
+  <div id="keys">
+    <kbd>1</kbd> Hop &nbsp; <kbd>2</kbd> Spin &nbsp; <kbd>3</kbd> Steam<br>
+    <kbd>V</kbd> Helmet visor &nbsp; <kbd>G</kbd> Night vision<br>
+    <kbd>E</kbd> Real / cartoon face &nbsp; <kbd>W</kbd> Wardrobe<br>
+    <kbd>B</kbd> Background &nbsp; <kbd>M</kbd> Flip &nbsp; <kbd>C</kbd> Preview<br>
+    <kbd>F</kbd> Fullscreen &nbsp; <kbd>H</kbd> Hide panels
+  </div>
+</div>
+<div id="wardrobe" class="panel">
+  <h2>👕 Wardrobe</h2>
+  <div class="hint">Click to put on. One item per slot.</div>
+  <div id="wardrobeList"></div>
+</div>
+<div id="touch">
+  <button data-key="h" class="main">☰ Panels</button>
+  <button data-key="w">👕 Wardrobe</button>
+  <button data-key="1">Hop</button>
+  <button data-key="2">Spin</button>
+  <button data-key="3">Steam</button>
+  <button data-key="v">Visor</button>
+  <button data-key="g">NVG</button>
+  <button data-key="e">Face</button>
+  <button data-key="b">BG</button>
+  <button data-key="c">Cam</button>
+</div>
+<video id="preview" class="hidden" autoplay playsinline muted></video>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
