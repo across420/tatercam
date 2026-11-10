@@ -2,9 +2,78 @@
 // Each item: { id, slot, name, build() -> { obj, update(st), steam? } }
 // st = { t, dt, jaw, smile, rot, drot:{x,y,z}, kick, visorDown, nvgDown }
 import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { FACE, TOP, outerPoint, shapeNormal, surfaceAt, ringPoint, halfWidthAt, smooth, vnoise } from './tater.js';
 
 const TAU = Math.PI * 2, Z = new THREE.Vector3(0, 0, 1);
+
+// ---------- model quality helpers ----------
+// Rounded boxes instead of sharp ones: edges catch the light like real objects.
+const RBox = (w, h, d) => new RoundedBoxGeometry(w, h, d, 3, Math.max(0.002, Math.min(w, h, d) * 0.22));
+// Flat webbing strap that follows a path and lies against the body (instead of a round hose).
+function ribbon(points, width, mat, thick = 0.012) {
+  const curve = new THREE.CatmullRomCurve3(points), N = Math.max(24, points.length * 12), pos = [], uv = [], idx = [];
+  for (let i = 0; i <= N; i++) {
+    const t = i / N, p = curve.getPoint(t), tan = curve.getTangent(t).normalize();
+    const out = new THREE.Vector3(p.x, p.y * 0.25, p.z).normalize(), side = new THREE.Vector3().crossVectors(tan, out).normalize();
+    for (const [sw, so] of [[-1, 0], [1, 0], [1, 1], [-1, 1]]) { const q = p.clone().addScaledVector(side, sw * width / 2).addScaledVector(out, so * thick); pos.push(q.x, q.y, q.z); uv.push(sw > 0 ? 1 : 0, t * N / 6); }
+  }
+  for (let i = 0; i < N; i++) for (let k = 0; k < 4; k++) { const a = i * 4 + k, b = i * 4 + (k + 1) % 4, c = a + 4, d = b + 4; idx.push(a, c, b, b, c, d); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx); g.computeVertexNormals();
+  return new THREE.Mesh(g, mat);
+}
+// Tileable surface-detail maps, built once and shared.
+const DETAIL = {};
+function detailTex(kind) {
+  if (DETAIL[kind]) return DETAIL[kind];
+  const N = 256, c = document.createElement('canvas'); c.width = c.height = N;
+  const ctx = c.getContext('2d'), img = ctx.createImageData(N, N), d = img.data;
+  const r2 = (x, y) => { const h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return h - Math.floor(h); };
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    let v = 0.5;
+    if (kind === 'weave') {            // Cordura-style basket weave
+      const cx = x % 8, cy = y % 8, a = ((x >> 3) + (y >> 3)) & 1;
+      const warp = Math.sin((a ? cx : cy) / 8 * Math.PI), weft = Math.sin((a ? cy : cx) / 8 * Math.PI) * 0.3;
+      v = 0.35 + warp * 0.45 + weft * 0.2 + (r2(x, y) - 0.5) * 0.12;
+    } else if (kind === 'grain') {     // matte paint / plastic speckle
+      v = 0.5 + (r2(x, y) - 0.5) * 0.5 + (r2(x >> 2, y >> 2) - 0.5) * 0.25;
+    } else if (kind === 'scratch') {   // worn metal: fine scratches on a brushed base
+      v = 0.55 + (r2(x, y >> 4) - 0.5) * 0.15;
+      if (r2(Math.floor((x + y * 0.3) / 3), 7) > 0.985) v = 0.25;
+      if (r2(Math.floor((x * 0.4 - y) / 2), 11) > 0.99) v = 0.3;
+    } else if (kind === 'rubber') {
+      v = 0.5 + (r2(x, y) - 0.5) * 0.2 + Math.sin(x * 0.4) * Math.sin(y * 0.4) * 0.05;
+    }
+    const o = (y * N + x) * 4, b = Math.max(0, Math.min(255, v * 255)); d[o] = d[o + 1] = d[o + 2] = b; d[o + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.NoColorSpace; t.userData.shared = true;
+  return (DETAIL[kind] = t);
+}
+// Give every solid material real surface detail based on what it's made of.
+function finishModel(root) {
+  const seen = new Map();
+  root.traverse(o => {
+    if (!o.isMesh || o.isInstancedMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach((m, i) => {
+      if (!m || !m.isMeshStandardMaterial || m.transparent || m.alphaMap || m.bumpMap || m.normalMap) return;
+      if (m.emissive && m.emissive.getHex() !== 0) return;
+      if (!o.geometry.attributes.uv) return;
+      let kind = m.metalness > 0.5 ? 'scratch' : m.roughness >= 0.86 ? 'weave' : m.roughness <= 0.62 && m.roughness >= 0.5 && m.color.getHSL({}).l < 0.2 ? 'rubber' : 'grain';
+      if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+      const rep = Math.max(1, Math.round(o.geometry.boundingSphere.radius * (kind === 'weave' ? 20 : 10)));
+      const key = m.uuid;
+      if (seen.has(key)) return;
+      seen.set(key, true);
+      const tex = detailTex(kind).clone(); tex.repeat.set(rep, rep); tex.userData.shared = false; tex.needsUpdate = true;
+      m.bumpMap = tex; m.bumpScale = kind === 'weave' ? 1.6 : kind === 'scratch' ? 0.5 : kind === 'rubber' ? 0.6 : 0.8;
+      if (kind === 'scratch') { m.roughnessMap = tex; m.roughness = Math.min(1, m.roughness + 0.25); }
+      m.needsUpdate = true;
+    });
+  });
+  return root;
+}
 const std = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.65, metalness: 0, ...o });
 const gold = () => std(0xffcf5a, { metalness: 1, roughness: 0.22 });
 const SMOOTH = { lumps: false, craters: false };
@@ -76,13 +145,14 @@ function band(y0, y1, extra, mat, crinkle = 0) {   // a wrap around the lower bo
   return new THREE.Mesh(g, mat);
 }
 function loop(y, extra, tube, mat, sag = 0) {
+  if (tube <= 0.04 && !sag) return band(y - tube * 1.4, y + tube * 1.4, extra, mat);
   const pts = []; for (let i = 0; i < 96; i++) { const a = i / 96 * TAU, fr = Math.max(0, Math.cos(a)); pts.push(ringPoint(y - sag * fr * fr, a, extra)); }
   return new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true), 160, tube, 12, true), mat);
 }
 function spring(k = 80, d = 9) { return { x: 0, v: 0, step(dt, target, kick = 0) { this.v += kick + ((target - this.x) * k - this.v * d) * dt; this.x += this.v * dt; if (!isFinite(this.x) || !isFinite(this.v)) { this.x = 0; this.v = 0; } this.x = Math.max(-3, Math.min(3, this.x)); return this.x; } }; }
 function strobe(parent, pos) {
   const light = new THREE.Mesh(new THREE.SphereGeometry(0.035, 12, 8), new THREE.MeshStandardMaterial({ color: 0x330000, emissive: 0xff2020, emissiveIntensity: 0 }));
-  const box = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.07, 0.1), std(0x222222)); box.position.copy(pos); light.position.set(0, 0.05, 0); box.add(light); parent.add(box);
+  const box = new THREE.Mesh(RBox(0.1, 0.07, 0.1), std(0x222222)); box.position.copy(pos); light.position.set(0, 0.05, 0); box.add(light); parent.add(box);
   return t => { light.material.emissiveIntensity = (t % 1.2) < 0.08 ? 4 : 0; };
 }
 const eyeTheta = Math.acos(FACE.eyeY / TOP);   // where the eyes sit on the sphere map
@@ -92,7 +162,7 @@ const HEAD = [
   { id: 'toppings', name: '🧈 Butter & Sour Cream', build() {
     const g = new THREE.Group();
     const top = outerPoint(new THREE.Vector3(0, 1, 0));
-    const butter = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.12, 0.32, 4, 2, 4), std(0xffd84d, { roughness: 0.3 }));
+    const butter = new THREE.Mesh(RBox(0.4, 0.12, 0.32, 4, 2, 4), std(0xffd84d, { roughness: 0.3 }));
     butter.position.set(-0.15, top.y - 0.02, 0.02); butter.rotation.set(0.12, 0.4, 0.25); g.add(butter);
     const cream = new THREE.Group(); cream.position.set(0.17, top.y - 0.06, 0.1);
     const cm = std(0xfbfaf4, { roughness: 0.5 });
@@ -114,12 +184,12 @@ const HEAD = [
     const th = eyeTheta - 0.42;
     g.add(shell(1.1, th, tan)); g.add(ring(1.1, th, 0.028, std(0x3b3528, { roughness: 0.9 })));
     const railMat = std(0x2e2b26, { roughness: 0.55, metalness: 0.35 });
-    for (const sx of [-1, 1]) g.add(placeOn(new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.11, 0.06), railMat), 1.1, [sx, 0.55, 0], 0.03));
-    const shroud = placeOn(new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.18, 0.06), railMat), 1.1, [0, 0.62, 0.78], 0.03); g.add(shroud);
-    const notch = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.07, 0.03), std(0x111111)); notch.position.set(0, -0.03, 0.035); shroud.add(notch);
+    for (const sx of [-1, 1]) g.add(placeOn(new THREE.Mesh(RBox(0.62, 0.11, 0.06), railMat), 1.1, [sx, 0.55, 0], 0.03));
+    const shroud = placeOn(new THREE.Mesh(RBox(0.28, 0.18, 0.06), railMat), 1.1, [0, 0.62, 0.78], 0.03); g.add(shroud);
+    const notch = new THREE.Mesh(RBox(0.11, 0.07, 0.03), std(0x111111)); notch.position.set(0, -0.03, 0.035); shroud.add(notch);
     const patch = placeOn(new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.2), new THREE.MeshStandardMaterial({ map: patchTex('TATER', '#3b3a2e', '#d8c690'), roughness: 0.95 })), 1.1, [0, 0.55, -0.83], 0.012);
     patch.rotateZ(Math.PI); g.add(patch);
-    g.add(placeOn(new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.2, 0.1), std(0x6f6248, { roughness: 0.95 })), 1.1, [0, 0.35, -1], 0.05));
+    g.add(placeOn(new THREE.Mesh(RBox(0.32, 0.2, 0.1), std(0x6f6248, { roughness: 0.95 })), 1.1, [0, 0.35, -1], 0.05));
     const blink = strobe(g, outerPoint(new THREE.Vector3(0, 1, -0.25).normalize()).multiplyScalar(1.1).add(new THREE.Vector3(0, 0.03, 0)));
     return { obj: g, update(st) { blink(st.t); } };
   } },
@@ -129,17 +199,18 @@ const HEAD = [
     const olive = std(0x5a5f44, { roughness: 0.5, metalness: 0.4, side: THREE.DoubleSide });
     const th = eyeTheta - 0.2;
     g.add(shell(1.12, th, olive)); g.add(ring(1.12, th, 0.035, std(0x2d2f24, { roughness: 0.8 })));
-    const visor = new THREE.Group(); g.add(visor);
+    const ap = FACE.eyeY + 0.12, visor = new THREE.Group(); visor.position.y = ap; g.add(visor);
+    const aIn = new THREE.Group(); aIn.position.y = -ap; visor.add(aIn);
     const vm = std(0x646a4c, { roughness: 0.42, metalness: 0.5, side: THREE.DoubleSide });
     const part = (t0, t1, p0 = Math.PI / 2 - 1.0, pl = 2.0) => new THREE.Mesh(conform(new THREE.SphereGeometry(1, 56, 16, p0, pl, t0, t1 - t0), 1.2), vm);
-    visor.add(part(eyeTheta - 0.34, eyeTheta - 0.08)); visor.add(part(eyeTheta + 0.07, eyeTheta + 0.75));
+    aIn.add(part(eyeTheta - 0.34, eyeTheta - 0.08)); aIn.add(part(eyeTheta + 0.07, eyeTheta + 0.75));
     for (const sx of [-1, 1]) {
-      visor.add(part(eyeTheta - 0.09, eyeTheta + 0.08, Math.PI / 2 + sx * 0.97 - 0.06, 0.12));
+      aIn.add(part(eyeTheta - 0.09, eyeTheta + 0.08, Math.PI / 2 + sx * 0.97 - 0.06, 0.12));
       const bolt = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.07, 20), std(0x3c3f30, { metalness: 0.6, roughness: 0.4 }));
       bolt.rotation.z = Math.PI / 2; bolt.position.copy(ringPoint(FACE.eyeY + 0.12, sx * Math.PI / 2, 0.2)); g.add(bolt);
     }
     let a = 0;
-    return { obj: g, update(st) { a += ((st.visorDown ? 0 : -1.05) - a) * Math.min(1, st.dt * 7); visor.rotation.x = a; } };
+    return { obj: g, update(st) { a += ((st.visorDown ? 0 : -0.75) - a) * Math.min(1, st.dt * 7); const k = -a / 0.75; visor.rotation.x = a; visor.position.set(0, ap + 0.12 * k, -0.42 * k); } };
   } },
 
   { id: 'ratnik', name: '🪖 Ratnik Helmet (camo)', build() {
@@ -176,7 +247,7 @@ const HEAD = [
     const top = TOP * 1.07;
     const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.14, 10), std(0xdddddd, { metalness: 0.7, roughness: 0.3 })); stem.position.y = top + 0.06; g.add(stem);
     const prop = new THREE.Group(); prop.position.y = top + 0.14; g.add(prop);
-    for (const [s, c] of [[1, 0xe53935], [-1, 0xfdd835]]) { const b = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.015, 0.1), std(c)); b.position.x = s * 0.21; b.rotation.x = s * 0.35; prop.add(b); }
+    for (const [s, c] of [[1, 0xe53935], [-1, 0xfdd835]]) { const b = new THREE.Mesh(RBox(0.4, 0.015, 0.1), std(c)); b.position.x = s * 0.21; b.rotation.x = s * 0.35; prop.add(b); }
     prop.add(new THREE.Mesh(new THREE.SphereGeometry(0.04, 12, 8), std(0x43a047)));
     return { obj: g, update(st) { prop.rotation.y += st.dt * (4 + st.jaw * 30 + st.smile * 12); } };
   } },
@@ -256,10 +327,10 @@ const EYES = [
   { id: 'nvg', name: '🟢 Night Vision Goggles (G)', build() {
     const g = new THREE.Group(); const dark = std(0x24261f, { roughness: 0.5, metalness: 0.35 });
     const my = FACE.eyeY + 0.5, mount = new THREE.Group(); mount.position.set(0, my, frontZ(my) + 0.06); g.add(mount);
-    mount.add(new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.12, 0.1), dark));
+    mount.add(new THREE.Mesh(RBox(0.22, 0.12, 0.1), dark));
     const dy = FACE.eyeY - my, dz = frontZ(FACE.eyeY) + 0.32 - mount.position.z;
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.09, Math.abs(dy) + 0.05, 0.07), dark); arm.position.set(0, dy / 2, dz * 0.45); arm.rotation.x = -Math.atan2(dz, -dy) * 0.6; mount.add(arm);
-    const housing = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.19, 0.2), dark); housing.position.set(0, dy, dz - 0.18); mount.add(housing);
+    const arm = new THREE.Mesh(RBox(0.09, Math.abs(dy) + 0.05, 0.07), dark); arm.position.set(0, dy / 2, dz * 0.45); arm.rotation.x = -Math.atan2(dz, -dy) * 0.6; mount.add(arm);
+    const housing = new THREE.Mesh(RBox(0.72, 0.19, 0.2), dark); housing.position.set(0, dy, dz - 0.18); mount.add(housing);
     const lens = new THREE.MeshStandardMaterial({ color: 0x0a1a0a, emissive: 0x39ff6a, emissiveIntensity: 0.2, roughness: 0.1 });
     [-0.26, -0.09, 0.09, 0.26].forEach((x, i) => {
       const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.072, 0.077, 0.3, 24), dark); tube.rotation.x = Math.PI / 2; tube.position.set(x, dy, dz); mount.add(tube);
@@ -276,7 +347,7 @@ const EYES = [
     const lensM = new THREE.Mesh(lensGeo, new THREE.MeshPhysicalMaterial({ color: 0xffa630, transparent: true, opacity: 0.5, roughness: 0.04, metalness: 0.3, clearcoat: 1, side: THREE.DoubleSide, depthWrite: false })); lensM.renderOrder = 4; g.add(lensM);
     const frameGeo = new THREE.CylinderGeometry(1, 1, 0.035, 64, 1, true, -0.87, 1.74); frameGeo.scale(rx + 0.005, 1, rz + 0.005);
     const frame = new THREE.Mesh(frameGeo, std(0x151515, { side: THREE.DoubleSide })); frame.position.y = 0.11; g.add(frame);
-    for (const sx of [-1, 1]) { const t = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.035, 0.6), std(0x151515)); t.position.set(sx * rx * 0.97, 0.1, -0.1); g.add(t); }
+    for (const sx of [-1, 1]) { const t = new THREE.Mesh(RBox(0.03, 0.035, 0.6), std(0x151515)); t.position.set(sx * rx * 0.97, 0.1, -0.1); g.add(t); }
     return { obj: g, update() {} };
   } },
 
@@ -322,20 +393,7 @@ const BODY = [
   { id: 'foil', name: '✨ Foil Wrap', build() {
     return { obj: band(-1.4, -0.5, 0.06, std(0xdde2e8, { metalness: 1, roughness: 0.32, side: THREE.DoubleSide, envMapIntensity: 1.4 }), true), update() {} };
   } },
-  { id: 'platecarrier', name: '🦺 Plate Carrier', build() {
-    const g = new THREE.Group();
-    const cloth = new THREE.MeshStandardMaterial({ map: camoTex('#7b7356', ['#5f6b45', '#9a8a62', '#4a4232', '#c2b48a']), roughness: 1, side: THREE.DoubleSide });
-    g.add(band(-1.22, -0.42, 0.09, cloth));
-    const zf = ringPoint(-0.78, 0, 0.09).z;
-    const plate = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.72, 0.12), cloth); plate.position.set(0, -0.78, zf + 0.04); g.add(plate);
-    for (const x of [-0.26, 0, 0.26]) {
-      const p = new THREE.Mesh(new THREE.BoxGeometry(0.21, 0.3, 0.14), std(0x6b6248, { roughness: 1 })); p.position.set(x, -0.98, zf + 0.16); g.add(p);
-      const flap = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.08, 0.15), std(0x564e3a)); flap.position.set(x, -0.82, zf + 0.16); g.add(flap);
-    }
-    const patch = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.2), new THREE.MeshStandardMaterial({ map: patchTex('TATER', '#2f3326', '#e0d29a'), roughness: 0.95 }));
-    patch.position.set(0, -0.56, zf + 0.105); g.add(patch);
-    return { obj: g, update() {} };
-  } },
+  { id: 'platecarrier', name: '🦺 Plate Carrier', build: () => armor({ tex: () => camoTex('#7b7356', ['#5f6b45', '#9a8a62', '#4a4232', '#c2b48a']), mags: 3, patch: ['TATER', '#2f3326', '#e0d29a'] }) },
   { id: 'chain', name: '⛓️ Gold Chain', build() {
     const g = new THREE.Group(); const au = gold(); const N = 52;
     const pos = a => { const fr = Math.max(0, Math.cos(a)); return ringPoint(-0.4 - 0.3 * fr * fr, a, 0.045); };
@@ -363,7 +421,7 @@ const BODY = [
     const y = -0.48; g.add(loop(y, 0.1, 0.13, mat));
     const tp = ringPoint(y - 0.05, 0.45, 0.16);
     const tailPivot = new THREE.Group(); tailPivot.position.copy(tp); g.add(tailPivot);
-    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.7, 0.07), mat); tail.position.y = -0.34; tailPivot.add(tail);
+    const tail = new THREE.Mesh(RBox(0.24, 0.7, 0.07), mat); tail.position.y = -0.34; tailPivot.add(tail);
     const sw = spring(40, 3);
     return { obj: g, update(st) { tailPivot.rotation.z = 0.1 + sw.step(st.dt, 0, -st.drot.z * 0.2 - st.drot.y * 0.08 + st.kick * 0.3); } };
   } },
@@ -427,7 +485,7 @@ function surfacePatch(x0, x1, y0, y1, off, mat, keep = null, nu = 40, nv = 30) {
 }
 function akMag(mat) {   // curved AK magazine
   const g = new THREE.Group();
-  for (let i = 0; i < 4; i++) { const b = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.085, 0.045), mat); b.position.set(i * i * 0.006, -i * 0.08, 0); b.rotation.z = i * 0.09; g.add(b); }
+  for (let i = 0; i < 4; i++) { const b = new THREE.Mesh(RBox(0.075, 0.085, 0.045), mat); b.position.set(i * i * 0.006, -i * 0.08, 0); b.rotation.z = i * 0.09; g.add(b); }
   return g;
 }
 
@@ -504,7 +562,7 @@ const MIL_HEAD = [
     const felt = std(0x2f4a2a, { roughness: 1 });
     const top = new THREE.Mesh(new THREE.SphereGeometry(0.62, 40, 20), felt); top.scale.set(1.05, 0.32, 0.95); top.position.set(-0.08, 0.1, 0); g.add(top);
     const band = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.04, 10, 48), std(0x1b1b14, { roughness: 0.8 })); band.rotation.x = Math.PI / 2; band.scale.set(1.08, 0.92, 1); g.add(band);
-    const flash = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.18, 0.02), std(0x2a3a7a)); flash.position.set(0.32, 0.06, 0.42); flash.rotation.y = 0.6; g.add(flash);
+    const flash = new THREE.Mesh(RBox(0.16, 0.18, 0.02), std(0x2a3a7a)); flash.position.set(0.32, 0.06, 0.42); flash.rotation.y = 0.6; g.add(flash);
     const badge = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.02, 20), gold()); badge.rotation.x = Math.PI / 2; badge.position.set(0.33, 0.07, 0.435); badge.rotation.z = 0.6; g.add(badge);
     return { obj: g, update() {} };
   } },
@@ -569,9 +627,9 @@ const MIL_EYES = [
     const g = new THREE.Group(); const dark = std(0x23251f, { roughness: 0.5, metalness: 0.35 });
     g.add(ring(1.11, eyeTheta * 0.55, 0.035, std(0x1d1d18, { roughness: 0.9 })));
     const my = FACE.eyeY + 0.55, mount = new THREE.Group(); mount.position.set(0, my, frontZ(my) + 0.05); g.add(mount);
-    mount.add(new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.12, 0.08), dark));
+    mount.add(new THREE.Mesh(RBox(0.2, 0.12, 0.08), dark));
     const x = FACE.eyeX, dy = FACE.eyeY - my, dz = frontZ(FACE.eyeY) + 0.3 - mount.position.z;
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.07, 0.07), dark); arm.position.set(x / 2, dy * 0.5, dz * 0.4); arm.rotation.z = Math.atan2(dy * 0.5, x); mount.add(arm);
+    const arm = new THREE.Mesh(RBox(0.34, 0.07, 0.07), dark); arm.position.set(x / 2, dy * 0.5, dz * 0.4); arm.rotation.z = Math.atan2(dy * 0.5, x); mount.add(arm);
     const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.095, 0.42, 28), dark); tube.rotation.x = Math.PI / 2; tube.position.set(x, dy, dz); mount.add(tube);
     const eyecup = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.085, 0.08, 28), std(0x111111, { roughness: 0.9 })); eyecup.rotation.x = Math.PI / 2; eyecup.position.set(x, dy, dz - 0.24); mount.add(eyecup);
     const lens = new THREE.MeshStandardMaterial({ color: 0x0a1a0a, emissive: 0x39ff6a, emissiveIntensity: 0.2, roughness: 0.1 });
@@ -586,17 +644,17 @@ const MIL_BODY = [
     const g = new THREE.Group(); const cloth = new THREE.MeshStandardMaterial({ map: woodlandTex(), roughness: 1 });
     const strap = std(0x3b3a2a, { roughness: 1 });
     const y = -0.78, zf = ringPoint(y, 0, 0.07).z;
-    const panel = new THREE.Mesh(new THREE.BoxGeometry(0.98, 0.42, 0.14), cloth); panel.position.set(0, y, zf + 0.03); g.add(panel);
+    const panel = new THREE.Mesh(RBox(0.98, 0.42, 0.14), cloth); panel.position.set(0, y, zf + 0.03); g.add(panel);
     const magMat = std(0x3a2a1c, { roughness: 0.5, metalness: 0.15 });
     for (let i = 0; i < 4; i++) {
       const x = -0.33 + i * 0.22;
-      const p = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.3, 0.12), cloth); p.position.set(x, y - 0.02, zf + 0.14); g.add(p);
+      const p = new THREE.Mesh(RBox(0.17, 0.3, 0.12), cloth); p.position.set(x, y - 0.02, zf + 0.14); g.add(p);
       const m = akMag(magMat); m.position.set(x - 0.01, y + 0.2, zf + 0.14); m.rotation.z = Math.PI; m.scale.set(0.9, 0.55, 0.9); g.add(m);
     }
     g.add(loop(y + 0.12, 0.07, 0.035, strap));
     for (const sx of [-1, 1]) {   // shoulder straps up the sides
       const pts = [ringPoint(y + 0.15, sx * 0.5, 0.07), ringPoint(-0.3, sx * 0.9, 0.06), ringPoint(-0.05, sx * 1.6, 0.05), ringPoint(y + 0.12, sx * 2.6, 0.07)];
-      g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 40, 0.04, 6), strap));
+      g.add(ribbon(pts, 0.09, strap, 0.02));
     }
     const flag = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.18), new THREE.MeshStandardMaterial({ map: patchTex('MGAS', '#3d4a2a', '#e8dcb0'), roughness: 0.9 }));
     flag.position.set(0, y + 0.1, zf + 0.105); g.add(flag);
@@ -627,7 +685,7 @@ const MIL_NECK = [
     const piv = new THREE.Group(); piv.position.copy(pos(0)); g.add(piv);
     const tags = [];
     for (const [dx, rz] of [[-0.02, 0.1], [0.03, -0.12]]) {
-      const t = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.17, 0.01), steel); t.position.set(dx, -0.1, 0.02); t.rotation.z = rz; piv.add(t); tags.push(t);
+      const t = new THREE.Mesh(RBox(0.11, 0.17, 0.01), steel); t.position.set(dx, -0.1, 0.02); t.rotation.z = rz; piv.add(t); tags.push(t);
     }
     const sw = spring(50, 3), sw2 = spring(60, 3);
     return { obj: g, update(st) { piv.rotation.z = sw.step(st.dt, 0, -st.drot.y * 0.05 - st.drot.z * 0.06 + st.kick * 0.3); tags[1].rotation.z = -0.12 + sw2.step(st.dt, 0, st.kick * 0.4 - st.drot.z * 0.04); } };
@@ -645,8 +703,8 @@ const MIL_NECK = [
 const MIL_BACK = [
   { id: 'radio', name: '📻 Radio Pack + Antenna', build() {
     const g = new THREE.Group(); const y = -0.6, zb = ringPoint(y, Math.PI, 0.05).z;
-    const pack = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.62, 0.3), std(0x4c513a, { roughness: 0.9 })); pack.position.set(0.05, y, zb - 0.15); g.add(pack);
-    const radio = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.28, 0.12), std(0x2a2c26, { roughness: 0.6, metalness: 0.2 })); radio.position.set(0.05, y + 0.2, zb - 0.32); g.add(radio);
+    const pack = new THREE.Mesh(RBox(0.62, 0.62, 0.3), std(0x4c513a, { roughness: 0.9 })); pack.position.set(0.05, y, zb - 0.15); g.add(pack);
+    const radio = new THREE.Mesh(RBox(0.4, 0.28, 0.12), std(0x2a2c26, { roughness: 0.6, metalness: 0.2 })); radio.position.set(0.05, y + 0.2, zb - 0.32); g.add(radio);
     const ant = new THREE.Group(); ant.position.set(0.25, y + 0.34, zb - 0.28); g.add(ant);
     const segs = []; let prev = ant;
     for (let i = 0; i < 6; i++) { const s = new THREE.Group(); s.position.y = i ? 0.22 : 0; const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.012 - i * 0.0012, 0.013 - i * 0.0012, 0.22, 6), std(0x111111)); rod.position.y = 0.11; s.add(rod); prev.add(s); prev = s; segs.push(s); }
@@ -859,7 +917,7 @@ const atacsTex = () => camoTex('#7e7a6a', ['#5d5a4c', '#a39d86', '#3e3c33', '#8c
 const flora = () => camoTex('#6a7a4a', ['#3f4a2a', '#8a8a5a', '#2a2e1e', '#a09060']);
 const blackMat = (o = {}) => std(0x1c1d1f, { roughness: 0.6, ...o });
 const steelMat = () => std(0x6e7378, { metalness: 0.85, roughness: 0.4 });
-function box(w, h, d, mat, x = 0, y = 0, z = 0, parent) { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); if (parent) parent.add(m); return m; }
+function box(w, h, d, mat, x = 0, y = 0, z = 0, parent) { const m = new THREE.Mesh(RBox(w, h, d), mat); m.position.set(x, y, z); if (parent) parent.add(m); return m; }
 function cyl(r1, r2, h, mat, parent, seg = 20) { const m = new THREE.Mesh(new THREE.CylinderGeometry(r1, r2, h, seg), mat); if (parent) parent.add(m); return m; }
 const helmetEdge = (front, side, back) => phi => { const f = Math.sin(phi); return f >= 0 ? lerpN(side, front, f) : lerpN(side, back, -f); };
 
@@ -896,7 +954,7 @@ function slungGun(make, side = 1) {   // rifle hanging diagonally across the bac
   const g = new THREE.Group(), y = -0.55, zb = ringPoint(y, Math.PI, 0.05).z;
   const gun = make(); gun.scale.setScalar(1.1); gun.position.set(0, y, zb - 0.12); gun.rotation.set(0, Math.PI, side * 0.75); g.add(gun);
   const pts = [ringPoint(-0.95, side * 2.4, 0.06), ringPoint(-0.6, side * 1.0, 0.07), ringPoint(-0.25, side * -0.6 + Math.PI * 0, 0.06), ringPoint(-0.15, side * -2.0, 0.06), ringPoint(-0.2, Math.PI, 0.08)];
-  g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 60, 0.022, 6), std(0x2b2a22, { roughness: 1 })));
+  g.add(ribbon(pts, 0.06, std(0x2b2a22, { roughness: 0.95 }), 0.012));
   const sw = spring(30, 3);
   return { obj: g, update(st) { gun.rotation.z = side * 0.75 + sw.step(st.dt, 0, -st.drot.z * 0.05 - st.drot.y * 0.03 + st.kick * 0.3); } };
 }
@@ -922,34 +980,61 @@ function headset2({ shellColor, capColor, slim = false, mic = true, cable = fals
 }
 function armor({ tex, color, collar = false, shoulders = false, mags = 0, pistolMag = false, admin = false, patch = null, low = -1.2, high = -0.4, bulk = 0.1 }) {
   const g = new THREE.Group();
-  const cloth = tex ? new THREE.MeshStandardMaterial({ map: tex(), roughness: 1, side: THREE.DoubleSide }) : std(color, { roughness: 0.95, side: THREE.DoubleSide });
-  g.add(band(low, high, bulk, cloth));
-  const yP = (low + high) / 2, zf = ringPoint(yP, 0, bulk).z;
-  box(0.86, high - low - 0.05, 0.11, cloth, 0, yP, zf + 0.03, g);
-  if (collar) { g.add(loop(high + 0.02, bulk + 0.03, 0.08, cloth)); g.add(band(high, high + 0.12, bulk + 0.05, cloth)); }
-  if (shoulders) for (const sx of [-1, 1]) { const p = new THREE.Mesh(new THREE.SphereGeometry(0.3, 18, 12, 0, Math.PI), cloth); p.position.copy(ringPoint(high - 0.05, sx * Math.PI / 2, bulk + 0.02)); p.rotation.y = sx * Math.PI / 2; p.scale.set(0.9, 0.7, 0.45); g.add(p); }
-  const pouchMat = tex ? cloth : std(new THREE.Color(color).multiplyScalar(0.85), { roughness: 1 });
-  const magMat = std(0x2b2c2e, { roughness: 0.5, metalness: 0.3 });
-  for (let i = 0; i < mags; i++) {
-    const x = (i - (mags - 1) / 2) * 0.2;
-    box(0.16, 0.26, 0.11, pouchMat, x, yP - 0.08, zf + 0.14, g);
-    box(0.1, 0.1, 0.05, magMat, x, yP + 0.07, zf + 0.14, g);
+  const cloth = tex ? new THREE.MeshStandardMaterial({ map: tex(), roughness: 0.95, side: THREE.DoubleSide }) : std(color, { roughness: 0.95, side: THREE.DoubleSide });
+  const dark = tex ? std(0x2a2a24, { roughness: 0.95 }) : std(new THREE.Color(color).multiplyScalar(0.6), { roughness: 0.95 });
+  const webbing = tex ? cloth : std(new THREE.Color(color).multiplyScalar(0.8), { roughness: 0.92 });
+  const yP = (low + high) / 2, plateH = high - low - 0.04, plateW = 0.84, zf = ringPoint(yP, 0, bulk).z;
+  // cummerbund wrapping the sides, with elastic edge binding
+  g.add(band(low + 0.08, high - 0.12, bulk - 0.02, cloth));
+  // front plate bag: curved to the body, rounded corners, bound edges
+  const plate = new THREE.Group(); plate.position.set(0, yP, zf + 0.02); g.add(plate);
+  const pg = new RoundedBoxGeometry(plateW, plateH, 0.12, 4, 0.05), pp = pg.attributes.position;
+  for (let i = 0; i < pp.count; i++) { const x = pp.getX(i); pp.setZ(i, pp.getZ(i) - 0.35 * x * x); }
+  pg.computeVertexNormals(); plate.add(new THREE.Mesh(pg, cloth));
+  { const ep = new RoundedBoxGeometry(plateW + 0.02, plateH + 0.02, 0.1, 4, 0.05), q = ep.attributes.position; for (let i = 0; i < q.count; i++) { const x = q.getX(i); q.setZ(i, q.getZ(i) - 0.35 * x * x); } ep.computeVertexNormals(); const edge = new THREE.Mesh(ep, dark); edge.position.z = -0.012; plate.add(edge); }
+  // MOLLE webbing rows with bar-tack stitching
+  const rows = Math.max(2, Math.floor(plateH / 0.1) - 1);
+  for (let r = 0; r < rows; r++) {
+    const y = -plateH / 2 + 0.08 + r * 0.085;
+    const row = new THREE.Mesh(new RoundedBoxGeometry(plateW - 0.08, 0.032, 0.012, 2, 0.005), webbing);
+    const rp = row.geometry.attributes.position; for (let i = 0; i < rp.count; i++) { const x = rp.getX(i); rp.setZ(i, rp.getZ(i) - 0.35 * x * x); } row.geometry.computeVertexNormals();
+    row.position.set(0, y, 0.066); plate.add(row);
+    for (let k = -3; k <= 3; k++) { const x = k * 0.11; box(0.008, 0.034, 0.014, dark, x, y, 0.07 - 0.35 * x * x, plate); }
   }
-  if (pistolMag) for (const x of [-0.12, 0.12]) box(0.07, 0.16, 0.06, pouchMat, x, yP + 0.2, zf + 0.12, g);
-  if (admin) { box(0.3, 0.16, 0.06, pouchMat, 0, high - 0.06, zf + 0.12, g); }
-  if (patch) { const pl = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.15), new THREE.MeshStandardMaterial({ map: patchTex(patch[0], patch[1], patch[2]), roughness: 0.9 })); pl.position.set(0, high - 0.06, zf + (admin ? 0.155 : 0.09)); g.add(pl); }
+  // shoulder straps running up and over to the back
+  for (const sx of [-1, 1]) {
+    const pts = [new THREE.Vector3(sx * 0.3, high - 0.02, zf + 0.04), ringPoint(high + 0.25, sx * 0.55, 0.05), ringPoint(high + 0.32, sx * 1.6, 0.05), ringPoint(high - 0.02, sx * 2.7, bulk)];
+    g.add(ribbon(pts, 0.11, cloth, 0.02));
+    g.add(ribbon([pts[0], pts[1], pts[2]].map(p => p.clone().multiplyScalar(1.004)), 0.07, dark, 0.03));
+  }
+  if (collar) { g.add(band(high - 0.04, high + 0.14, bulk + 0.06, cloth)); g.add(band(high + 0.12, high + 0.15, bulk + 0.075, dark)); }
+  if (shoulders) for (const sx of [-1, 1]) { const pts = []; for (let k = 0; k <= 6; k++) pts.push(ringPoint(high + 0.08 - k * 0.07, sx * Math.PI / 2, bulk + 0.05 + 0.02 * Math.sin(k / 6 * Math.PI))); g.add(ribbon(pts, 0.42, cloth, 0.06)); g.add(ribbon(pts.map(p => p.clone().multiplyScalar(1.01)), 0.44, dark, 0.012)); }
+  // pouches: rounded body, overhanging flap, buckle, mags peeking out
+  const magMat = std(0x2b2c2e, { roughness: 0.5, metalness: 0.35 }), buckleMat = std(0x111111, { roughness: 0.4 });
+  for (let i = 0; i < mags; i++) {
+    const x = (i - (mags - 1) / 2) * 0.19, z = 0.07 - 0.35 * x * x + 0.06;
+    const pouch = new THREE.Group(); pouch.position.set(x, -plateH / 2 + 0.17, z); plate.add(pouch);
+    pouch.add(new THREE.Mesh(new RoundedBoxGeometry(0.16, 0.25, 0.1, 3, 0.03), cloth));
+    const mag = new THREE.Mesh(new RoundedBoxGeometry(0.1, 0.12, 0.05, 2, 0.012), magMat); mag.position.set(0, 0.15, 0); pouch.add(mag);
+    const flap = new THREE.Mesh(new RoundedBoxGeometry(0.165, 0.07, 0.11, 3, 0.025), cloth); flap.position.set(0, 0.1, 0.005); pouch.add(flap);
+    const buckle = new THREE.Mesh(new RoundedBoxGeometry(0.05, 0.035, 0.015, 2, 0.006), buckleMat); buckle.position.set(0, 0.055, 0.06); pouch.add(buckle);
+    const bungee = new THREE.Mesh(new THREE.TorusGeometry(0.035, 0.006, 6, 16), buckleMat); bungee.position.set(0, 0.2, 0); bungee.rotation.x = Math.PI / 2; pouch.add(bungee);
+  }
+  if (pistolMag) for (const x of [-0.12, 0.12]) { const pm = new THREE.Group(); pm.position.set(x, plateH / 2 - 0.12, 0.12 - 0.35 * x * x); plate.add(pm); pm.add(new THREE.Mesh(new RoundedBoxGeometry(0.07, 0.15, 0.06, 2, 0.015), cloth)); }
+  if (admin) { const ad = new THREE.Mesh(new RoundedBoxGeometry(0.32, 0.16, 0.06, 3, 0.02), cloth); ad.position.set(0, plateH / 2 - 0.1, 0.11); plate.add(ad); }
+  if (patch) { const pl = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.15), new THREE.MeshStandardMaterial({ map: patchTex(patch[0], patch[1], patch[2]), roughness: 0.9 })); pl.position.set(0, plateH / 2 - 0.1, admin ? 0.145 : 0.075); plate.add(pl); }
   return { obj: g, update() {} };
 }
 function backpack({ tex, color, w = 0.7, h = 0.85, d = 0.38, bedroll = false, frame = false }) {
   const g = new THREE.Group(), y = -0.55, zb = ringPoint(y, Math.PI, 0.05).z;
   const mat = tex ? new THREE.MeshStandardMaterial({ map: tex(), roughness: 1 }) : std(color, { roughness: 0.95 });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d, 3, 3, 3), mat); body.position.set(0, y + 0.1, zb - d / 2 - 0.02);
+  const body = new THREE.Mesh(RBox(w, h, d, 3, 3, 3), mat); body.position.set(0, y + 0.1, zb - d / 2 - 0.02);
   const p = body.geometry.attributes.position; for (let i = 0; i < p.count; i++) { const x = p.getX(i), yy = p.getY(i), z = p.getZ(i); p.setXYZ(i, x * (1 - 0.08 * (yy / h + 0.5)), yy, z * (0.85 + 0.15 * Math.cos(x / w * 2))); } body.geometry.computeVertexNormals(); g.add(body);
   box(w * 0.7, h * 0.35, 0.1, mat, 0, y - 0.05, zb - d - 0.06, g);           // front pocket
   for (const sx of [-1, 1]) box(0.12, h * 0.5, d * 0.6, mat, sx * (w / 2 + 0.05), y, zb - d / 2, g);
   if (bedroll) { const r = cyl(0.13, 0.13, w + 0.2, std(0x5a6a3a, { roughness: 1 }), g); r.rotation.z = Math.PI / 2; r.position.set(0, y + h / 2 + 0.2, zb - d / 2); }
   if (frame) for (const sx of [-1, 1]) { const t = cyl(0.015, 0.015, h + 0.3, steelMat(), g, 8); t.position.set(sx * (w / 2 - 0.05), y + 0.15, zb - 0.02); }
-  for (const sx of [-1, 1]) { const pts = [ringPoint(y + h / 2, Math.PI + sx * 0.4, 0.06), ringPoint(-0.25, sx * 1.2, 0.07), ringPoint(-0.75, sx * 0.9, 0.07), ringPoint(y - 0.3, Math.PI + sx * 0.6, 0.06)]; g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 40, 0.035, 6), std(0x232320, { roughness: 1 }))); }
+  for (const sx of [-1, 1]) { const pts = [ringPoint(y + h / 2, Math.PI + sx * 0.4, 0.06), ringPoint(-0.25, sx * 1.2, 0.07), ringPoint(-0.75, sx * 0.9, 0.07), ringPoint(y - 0.3, Math.PI + sx * 0.6, 0.06)]; g.add(ribbon(pts, 0.09, std(0x232320, { roughness: 0.95 }), 0.02)); }
   const sw = spring(28, 3.5); const piv = new THREE.Group(); g.add(piv);
   return { obj: g, update(st) { body.rotation.x = sw.step(st.dt, 0, -st.drot.x * 0.02 + st.kick * 0.15) * 0.3; } };
 }
@@ -959,20 +1044,21 @@ const TK_HEAD = [
     const g = new THREE.Group(); const green = std(0x4f5a3c, { roughness: 0.55, metalness: 0.3, side: THREE.DoubleSide });
     const edge = helmetEdge(eyeTheta - 0.22, eyeTheta + 0.25, eyeTheta + 0.3);
     g.add(cap(1.12, edge, green)); g.add(capEdge(1.12, edge, 0.035, blackMat()));
-    const visor = new THREE.Group(); g.add(visor);
+    const pivotY = FACE.eyeY + 0.25, visor = new THREE.Group(); visor.position.y = pivotY; g.add(visor);
+    const vInner = new THREE.Group(); vInner.position.y = -pivotY; visor.add(vInner);
     const vm = std(0x56603f, { roughness: 0.45, metalness: 0.4, side: THREE.DoubleSide });
     const ex = FACE.eyeX, kx = halfWidthAt(FACE.eyeY) * 0.95, ky0 = FACE.mouthY - 0.35, ky1 = FACE.eyeY + 0.2;
     const keep = (x, y) => { const t = (y - ky0) / (ky1 - ky0); const half = kx * (t > 0.5 ? 1 : Math.sqrt(Math.max(0, 1 - ((0.5 - t) / 0.5) ** 2)) * 0.5 + 0.5); return Math.abs(x) < half && !(Math.abs(y - FACE.eyeY) < 0.045 && Math.abs(Math.abs(x) - ex) < 0.17); };   // eye slits
-    visor.add(surfacePatch(-kx, kx, ky0, ky1, 0.17, vm, keep, 50, 40));
+    vInner.add(surfacePatch(-kx, kx, ky0, ky1, 0.17, vm, keep, 50, 40));
     for (const sx of [-1, 1]) { const b = cyl(0.07, 0.07, 0.06, steelMat(), g, 16); b.rotation.z = Math.PI / 2; b.position.copy(ringPoint(FACE.eyeY + 0.25, sx * Math.PI / 2, 0.16)); }
-    let a = -1.15;
-    return { obj: g, update(st) { a += ((st.visorDown ? 0 : -1.15) - a) * Math.min(1, st.dt * 7); visor.rotation.x = a; visor.position.y = -a * 0.05; } };
+    let a = -1.0;
+    return { obj: g, update(st) { a += ((st.visorDown ? 0 : -1.0) - a) * Math.min(1, st.dt * 7); const k = -a / 1.0; visor.rotation.x = a; visor.position.set(0, pivotY + 0.05 * k, -0.42 * k); } };
   } },
   { id: 'fastmt', name: '⚫ FAST MT Helmet (black, NVG mount)', build() {
     const g = new THREE.Group(); const blk = std(0x2a2b2c, { roughness: 0.75, side: THREE.DoubleSide });
     const edge = helmetEdge(eyeTheta - 0.38, eyeTheta - 0.2, eyeTheta + 0.05);
     g.add(cap(1.1, edge, blk)); g.add(capEdge(1.1, edge, 0.03, std(0x141414)));
-    for (const sx of [-1, 1]) g.add(placeOn(new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.09, 0.05), std(0x111111, { roughness: 0.5 })), 1.1, [sx, 0.5, 0.05], 0.03));
+    for (const sx of [-1, 1]) g.add(placeOn(new THREE.Mesh(RBox(0.55, 0.09, 0.05), std(0x111111, { roughness: 0.5 })), 1.1, [sx, 0.5, 0.05], 0.03));
     const sh = placeOn(new THREE.Group(), 1.1, [0, 0.55, 0.83], 0.03); g.add(sh); box(0.26, 0.17, 0.06, std(0x111111), 0, 0, 0, sh);
     const bat = placeOn(new THREE.Group(), 1.1, [0, 0.35, -1], 0.06); g.add(bat); box(0.3, 0.18, 0.1, std(0x3a3a2a, { roughness: 0.9 }), 0, 0, 0, bat);
     const blink = strobe(g, outerPoint(new THREE.Vector3(0, 1, -0.3).normalize()).multiplyScalar(1.1).add(new THREE.Vector3(0, 0.03, 0)));
@@ -983,19 +1069,20 @@ const TK_HEAD = [
     const edge = helmetEdge(eyeTheta - 0.35, eyeTheta - 0.15, eyeTheta + 0.1);
     g.add(cap(1.1, edge, tan)); g.add(capEdge(1.1, edge, 0.03, std(0x4a3f2c)));
     for (let i = -2; i <= 2; i++) { const pts = []; for (let k = 0; k <= 20; k++) pts.push(outerPoint(dirAt(0.15 + k / 20 * (eyeTheta - 0.5), Math.PI / 2 + i * 0.35)).multiplyScalar(1.115)); g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 30, 0.02, 6), std(0x9a8462, { roughness: 0.8 }))); }
-    for (const sx of [-1, 1]) g.add(placeOn(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.05), std(0x6a5a40)), 1.1, [sx, 0.45, 0.1], 0.03));
+    for (const sx of [-1, 1]) g.add(placeOn(new THREE.Mesh(RBox(0.5, 0.08, 0.05), std(0x6a5a40)), 1.1, [sx, 0.45, 0.1], 0.03));
     return { obj: g, update() {} };
   } },
   { id: 'kolpak', name: '🚔 Kolpak Riot Helmet (V)', build() {
     const g = new THREE.Group(); const sh = std(0x2c3238, { roughness: 0.4, metalness: 0.2, side: THREE.DoubleSide });
     const edge = helmetEdge(eyeTheta - 0.2, eyeTheta + 0.35, eyeTheta + 0.45);
     g.add(cap(1.12, edge, sh)); g.add(capEdge(1.12, edge, 0.035, blackMat()));
-    const visor = new THREE.Group(); g.add(visor);
+    const kp = FACE.eyeY + 0.3, visor = new THREE.Group(); visor.position.y = kp; g.add(visor);
+    const vIn = new THREE.Group(); vIn.position.y = -kp; visor.add(vIn);
     const vg = new THREE.MeshPhysicalMaterial({ color: 0xdfe8ea, transparent: true, opacity: 0.16, roughness: 0.02, clearcoat: 1, envMapIntensity: 2.5, side: THREE.DoubleSide, depthWrite: false });
-    const vp = surfacePatch(-halfWidthAt(FACE.eyeY), halfWidthAt(FACE.eyeY), FACE.mouthY - 0.4, FACE.eyeY + 0.25, 0.2, vg, null, 40, 30); vp.renderOrder = 6; visor.add(vp);
-    visor.add(surfaceRing(0, (FACE.mouthY - 0.4 + FACE.eyeY + 0.25) / 2, halfWidthAt(FACE.eyeY) * 0.98, (FACE.eyeY + 0.25 - FACE.mouthY + 0.4) / 2, 0.2, 0.02, blackMat(), 64));
+    const vp = surfacePatch(-halfWidthAt(FACE.eyeY), halfWidthAt(FACE.eyeY), FACE.mouthY - 0.4, FACE.eyeY + 0.25, 0.2, vg, null, 40, 30); vp.renderOrder = 6; vIn.add(vp);
+    vIn.add(surfaceRing(0, (FACE.mouthY - 0.4 + FACE.eyeY + 0.25) / 2, halfWidthAt(FACE.eyeY) * 0.98, (FACE.eyeY + 0.25 - FACE.mouthY + 0.4) / 2, 0.2, 0.02, blackMat(), 64));
     let a = 0;
-    return { obj: g, update(st) { a += ((st.visorDown ? 0 : -1.1) - a) * Math.min(1, st.dt * 7); visor.rotation.x = a; } };
+    return { obj: g, update(st) { a += ((st.visorDown ? 0 : -0.95) - a) * Math.min(1, st.dt * 7); const k = -a / 0.95; visor.rotation.x = a; visor.position.set(0, kp + 0.05 * k, -0.4 * k); } };
   } },
   { id: 'ssh68', name: '🪖 SSh-68 Soviet Steel Helmet', build() {
     const g = new THREE.Group(); const green = std(0x4a5236, { roughness: 0.6, metalness: 0.5, side: THREE.DoubleSide });
@@ -1068,7 +1155,7 @@ const TK_FACE = [
     const lens = new THREE.MeshPhysicalMaterial({ color: 0x0c2a10, transparent: true, opacity: 0.55, roughness: 0.05, clearcoat: 1, envMapIntensity: 2, depthWrite: false });
     const l = surfacePatch(-0.42, 0.42, FACE.eyeY - 0.11, FACE.eyeY + 0.11, 0.15, lens); l.renderOrder = 6; g.add(l);
     g.add(surfaceRing(0, FACE.eyeY, 0.43, 0.115, 0.155, 0.018, metal, 40));
-    for (let i = 0; i < 3; i++) { const s = surfaceAt(0, FACE.mouthY - 0.1 - i * 0.08, SMOOTH); const slot = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.015, 0.02), blackMat()); slot.position.copy(s.p).addScaledVector(s.n, 0.15); slot.quaternion.setFromUnitVectors(Z, s.n); g.add(slot); }
+    for (let i = 0; i < 3; i++) { const s = surfaceAt(0, FACE.mouthY - 0.1 - i * 0.08, SMOOTH); const slot = new THREE.Mesh(RBox(0.3, 0.015, 0.02), blackMat()); slot.position.copy(s.p).addScaledVector(s.n, 0.15); slot.quaternion.setFromUnitVectors(Z, s.n); g.add(slot); }
     g.add(loop(FACE.eyeY + 0.25, 0.08, 0.03, blackMat()));
     return { obj: g, update() {} };
   } },
@@ -1422,7 +1509,7 @@ export const SLOTS = [
   { id: 'eyes', name: 'Eyewear', anchor: 'head' }, { id: 'ears', name: 'Ears', anchor: 'head' },
   { id: 'neck', name: 'Neck', anchor: 'waist' }, { id: 'body', name: 'Body', anchor: 'waist' }, { id: 'belt', name: 'Belt', anchor: 'hip' }, { id: 'back', name: 'Back', anchor: 'waist' }
 ];
-export const ITEMS = [
+const ITEMS_RAW = [
   ...HAIRDOS2.map(i => ({ ...i, slot: 'hair' })), ...BEARDS2.map(i => ({ ...i, slot: 'beard' })), ...STACHES2.map(i => ({ ...i, slot: 'stache' })),
   ...[...MIL_HEAD, ...TK_HEAD, ...LOGO_HEAD, ...HEAD].map(i => ({ ...i, slot: 'head' })), ...[...MIL_FACE, ...TK_FACE].map(i => ({ ...i, slot: 'face' })),
   ...[...EYES, ...MIL_EYES, ...TK_EYES].map(i => ({ ...i, slot: 'eyes' })), ...[...EARS, ...TK_EARS].map(i => ({ ...i, slot: 'ears' })),
@@ -1430,4 +1517,5 @@ export const ITEMS = [
   ...[...BODY.filter(i => !NECK_IDS.includes(i.id)), ...MIL_BODY, ...TK_BODY].map(i => ({ ...i, slot: 'body' })),
   ...[...MIL_BACK, ...TK_BACK].map(i => ({ ...i, slot: 'back' })), ...LOGO_BELT.map(i => ({ ...i, slot: 'belt' }))
 ];
+export const ITEMS = ITEMS_RAW.map(it => ({ ...it, build() { const b = it.build(); finishModel(b.obj); return b; } }));
 export const DEFAULT_OUTFIT = { hair: 'none', beard: 'none', stache: 'none', head: 'none', face: 'none', eyes: 'none', ears: 'none', neck: 'none', body: 'none', belt: 'none', back: 'none' };
