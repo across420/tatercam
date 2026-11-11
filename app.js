@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { FaceLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
-import { buildTater, RealFace, CartoonFace, OneEuro, TOP } from './tater.js';
+import { buildTater, RealFace, CartoonFace, OneEuro, TOP, BONE_Y } from './tater.js';
 import { SLOTS, ITEMS, DEFAULT_OUTFIT, CUSTOM, CREDITS } from './wardrobe.js';
 
 // ---------- Saved settings ----------
@@ -24,7 +24,7 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 
 const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.1, 100);
-camera.position.set(0, 0.15, 7.4);
+camera.position.set(0, 0.1, 8.8);
 camera.lookAt(0, 0.1, 0);
 
 scene.add(new THREE.HemisphereLight(0xfff2dd, 0x4a2c18, 1.0));
@@ -34,7 +34,7 @@ const rim = new THREE.DirectionalLight(0xffcf8a, 1.8); rim.position.set(-3, 2, -
 
 function fitCamera() {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
-  camera.position.z = 7.4 * Math.max(1, 0.82 / camera.aspect);   // keep the whole potato in view on tall phone screens
+  camera.position.z = 8.8 * Math.max(1, 0.82 / camera.aspect);   // keep the whole potato in view on tall phone screens
   renderer.setSize(innerWidth, innerHeight);
 }
 fitCamera();
@@ -376,7 +376,7 @@ function animate() {
   const stretch = 1 + talk * 0.035 - squash + (hopV > 0 ? 0.06 : 0);
   hip.scale.set(1 / Math.sqrt(stretch), stretch, 1 / Math.sqrt(stretch));
   waist.scale.set(1 + breathe, 1 - breathe * 0.5, 1 + breathe);
-  head.position.y = 0.48 + talk * 0.03;   // head bone sits 0.48 above the waist
+  head.position.y = (BONE_Y.head - BONE_Y.waist) + talk * 0.03;
   const depth = 1 + cur.tz;
   avatar.scale.setScalar(depth);
   avatar.position.set(cur.tx * 0.55, -0.15 + cur.ty * 0.6 + hopY + Math.sin(t * 1.6) * 0.02 * idle, 0);
@@ -393,7 +393,7 @@ function animate() {
   totalRot.y = hip.rotation.y + waist.rotation.y + head.rotation.y + spinY;
   totalRot.z = hip.rotation.z + waist.rotation.z + head.rotation.z;
   for (const k of ['x', 'y', 'z']) { const v = (totalRot[k] - prevTotal[k]) / Math.max(dt, 1 / 240); drot[k] = isFinite(v) ? Math.max(-20, Math.min(20, v)) : 0; prevTotal[k] = totalRot[k]; }
-  const st = { t, dt, jaw: cur.jaw, smile: cur.smile, rot: totalRot, drot, kick, visorDown, nvgDown };
+  const st = { t, dt, jaw: cur.jaw, smile: cur.smile, rot: totalRot, drot, kick, visorDown, nvgDown, vest: !!(worn.body && worn.body.id !== 'none') };
   for (const s in worn) if (worn[s].update) { try { worn[s].update(st); } catch (e) { console.error(e); } }
   kick = 0;
 

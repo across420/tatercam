@@ -25,21 +25,20 @@ export function fbm(x, y, z, oct = 4) {
 export const smooth = (e0, e1, x) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
 const gauss = (v, c, s) => Math.exp(-(((v - c) / s) ** 2));
 
-// ---------- Shape: tall russet like the reference ----------
-// Narrow top tilted to the right, waist dip on the left, big lower-left lobe, flatter front to back.
-export const SY = 1.34;
-export const FACE = { eyeX: 0.3, eyeY: 0.45, mouthY: -0.12 };
-// smooth rounded oval like the reference: broad ends, slightly fuller on the lower right, a gentle lean
-const widthL = v => 0.85 + 0.02 * gauss(v, 0.6, 0.3) + 0.03 * gauss(v, -0.4, 0.4);
-const widthR = v => 0.87 + 0.03 * gauss(v, -0.05, 0.45);
-function widths(d) {
-  const h = Math.hypot(d.x, d.z) || 1e-6;
-  const s = smooth(-0.35, 0.35, d.x / h);
-  const v = d.y, wl = widthL(v), wr = widthR(v);
-  return { wx: lerp(wl, wr, s), wz: 0.8 * (wl + wr) / 2 };
+// ---------- Shape: two-lobe russet (head lobe, neck pinch, body lobe) ----------
+// Like a peanut: gear made for people has a head to sit on and a body to wrap around.
+export const SY = 1.72;
+export const FACE = { eyeX: 0.235, eyeY: 1.1, mouthY: 0.73 };
+const HEAD = { cy: 0.9, a: 0.67, b: 0.82 }, BODYL = { cy: -0.6, a: 0.95, b: 1.12 };
+function profileR(y) {          // radius of the potato at height y: two ellipses joined with a soft neck
+  const eh = 1 - ((y - HEAD.cy) / HEAD.b) ** 2, eb = 1 - ((y - BODYL.cy) / BODYL.b) ** 2;
+  const rh = eh > 0 ? HEAD.a * Math.sqrt(eh) : 0, rb = eb > 0 ? BODYL.a * Math.sqrt(eb) : 0, k = 0.34;
+  const h = Math.min(1, Math.max(0, 0.5 + 0.5 * (rh - rb) / k));
+  return Math.max(rh, rb, lerp(rb, rh, h) + k * h * (1 - h) * (eh > -0.6 && eb > -0.6 ? 1 : 0));
 }
-const tilt = v => 0.085 * v;   // top leans a little to the right
-const faceMask = d => smooth(0.4, 0.8, d.z) * (1 - smooth(0.5, 0.8, Math.abs(d.y - 0.1)));
+const depthAt = y => lerp(0.8, 0.9, smooth(0.1, 0.6, y));
+const tilt = v => 0.03 * v;
+const faceMask = d => smooth(0.4, 0.8, d.z) * (1 - smooth(0.12, 0.3, Math.abs(d.y - 0.56)));
 function lumpR(d) {
   const fm = faceMask(d);
   const big = (fbm(d.x * 1.6 + 3, d.y * 1.6, d.z * 1.6, 3) - 0.5) * 0.05;
@@ -49,9 +48,8 @@ function lumpR(d) {
 }
 const V = new THREE.Vector3();
 function basePoint(d, out = new THREE.Vector3(), lumps = true) {
-  const { wx, wz } = widths(d), r = lumps ? lumpR(d) : 1;
-  const h = Math.hypot(d.x, d.z), blunt = h > 1e-6 ? Math.pow(h, -(0.3 + 0.12 * smooth(0, 1, d.y))) : 1;   // round, broad ends
-  return out.set(d.x * blunt * wx * r + tilt(d.y), d.y * SY * r, d.z * blunt * wz * r);
+  const y = d.y * SY, hz = Math.hypot(d.x, d.z) || 1e-6, r = profileR(y), L = lumps ? lumpR(d) : 1;
+  return out.set(d.x / hz * r * L + tilt(d.y), y * (1 + (L - 1) * 0.4), d.z / hz * r * depthAt(y) * L);
 }
 
 // Face craters (sockets for eyes and mouth)
@@ -242,7 +240,7 @@ function makeSkin(W = 2048, H = 1024) {
 
 // ---------- Build the rigged potato ----------
 // Bones: hip (bottom) -> waist -> head. Head moves the face; waist and hip give the lower-body sway.
-export const BONE_Y = { hip: -1.3, waist: -0.8, head: -0.32 };
+export const BONE_Y = { hip: -1.5, waist: -0.6, head: 0.36 };
 export function buildTater({ skinSize = 1024, textureBase = null, hiRes = true } = {}) {
   const geo = new THREE.SphereGeometry(1, 220, 160);
   const pa = geo.attributes.position, v = new THREE.Vector3(), p = new THREE.Vector3();
@@ -251,9 +249,9 @@ export function buildTater({ skinSize = 1024, textureBase = null, hiRes = true }
     v.fromBufferAttribute(pa, i).normalize();
     shapePoint(v, p); pa.setXYZ(i, p.x, p.y, p.z);
     const y = p.y;
-    if (y > -0.22) { idx.push(2, 0, 0, 0); wts.push(1, 0, 0, 0); }
-    else if (y > -0.6) { const k = smooth(-0.6, -0.22, y); idx.push(2, 1, 0, 0); wts.push(k, 1 - k, 0, 0); }
-    else if (y > -1.05) { const k = smooth(-1.05, -0.6, y); idx.push(1, 0, 0, 0); wts.push(k, 1 - k, 0, 0); }
+    if (y > 0.5) { idx.push(2, 0, 0, 0); wts.push(1, 0, 0, 0); }
+    else if (y > 0.15) { const k = smooth(0.15, 0.5, y); idx.push(2, 1, 0, 0); wts.push(k, 1 - k, 0, 0); }
+    else if (y > -1.15) { const k = smooth(-1.15, -0.75, y); idx.push(1, 0, 0, 0); wts.push(k, 1 - k, 0, 0); }
     else { idx.push(0, 0, 0, 0); wts.push(1, 0, 0, 0); }
   }
   geo.computeVertexNormals();
@@ -297,7 +295,7 @@ export function buildTater({ skinSize = 1024, textureBase = null, hiRes = true }
   const nubMat = new THREE.MeshStandardMaterial({ color: 0x9c8a4c, roughness: 0.9 });
   for (const s of SPROUTS) {
     const sp = shapePoint(s), n = shapeNormal(s);
-    const parent = sp.y > -0.22 ? anchors.head : sp.y > -0.8 ? anchors.waist : anchors.hip;
+    const parent = sp.y > 0.38 ? anchors.head : sp.y > -0.9 ? anchors.waist : anchors.hip;
     for (let k = 0; k < 3; k++) {
       const nub = new THREE.Mesh(new THREE.SphereGeometry(0.01 + k * 0.003, 8, 6), nubMat);
       nub.position.copy(sp).addScaledVector(n, 0.005).add(new THREE.Vector3((k - 1) * 0.022, (k % 2) * 0.015, 0));
@@ -331,9 +329,9 @@ export class RealFace {
     this.hasFrame = false;
     this.f = { u: new OneEuro(0.8, 0.01), ang: new OneEuro(1.0, 0.3) };
     const eyeAt = x => surfaceAt(x, FACE.eyeY);
-    this.eyeL = this.feature(eyeAt(-FACE.eyeX), 0.44, 0.31, 320, 226, 0.012);
-    this.eyeR = this.feature(eyeAt(FACE.eyeX), 0.44, 0.31, 320, 226, 0.012);
-    this.mouth = this.feature(surfaceAt(0, FACE.mouthY), 0.66, 0.46, 384, 268, 0.012);
+    this.eyeL = this.feature(eyeAt(-FACE.eyeX), 0.36, 0.25, 320, 226, 0.012);
+    this.eyeR = this.feature(eyeAt(FACE.eyeX), 0.36, 0.25, 320, 226, 0.012);
+    this.mouth = this.feature(surfaceAt(0, FACE.mouthY), 0.54, 0.38, 384, 268, 0.012);
   }
   feature(at, w, h, cw, ch, lift) {
     const canvas = document.createElement('canvas'); canvas.width = cw; canvas.height = ch;
@@ -403,16 +401,16 @@ export class CartoonFace {
     const place = (obj, x, y, off) => { const s = surfaceAt(x, y); obj.position.copy(s.p).addScaledVector(s.n, off); obj.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), s.n); };
     const makeEye = x => {
       const g = new THREE.Group(); place(g, x, FACE.eyeY, 0.03);
-      const w = new THREE.Mesh(new THREE.SphereGeometry(0.15, 32, 20), white); w.scale.set(1, 0.9, 0.6); g.add(w);
+      const w = new THREE.Mesh(new THREE.SphereGeometry(0.12, 32, 20), white); w.scale.set(1, 0.9, 0.6); g.add(w);
       const pupil = new THREE.Group();
-      const pm = new THREE.Mesh(new THREE.SphereGeometry(0.07, 24, 16), black); pm.scale.set(1, 1.05, 0.5); pupil.add(pm);
+      const pm = new THREE.Mesh(new THREE.SphereGeometry(0.056, 24, 16), black); pm.scale.set(1, 1.05, 0.5); pupil.add(pm);
       const hl = new THREE.Mesh(new THREE.SphereGeometry(0.02, 12, 8), white); hl.position.set(0.025, 0.03, 0.035); pupil.add(hl);
       pupil.position.z = 0.08; g.add(pupil); face.add(g); return { g, pupil };
     };
     this.eyeL = makeEye(-FACE.eyeX); this.eyeR = makeEye(FACE.eyeX);
     this.mouth = new THREE.Group(); place(this.mouth, 0, FACE.mouthY, 0.0);
     this.mouth.userData.y0 = this.mouth.position.y;
-    this.mouthInner = new THREE.Mesh(new THREE.SphereGeometry(0.2, 32, 20), new THREE.MeshStandardMaterial({ color: 0x3b0f0f, roughness: 0.6 }));
+    this.mouthInner = new THREE.Mesh(new THREE.SphereGeometry(0.16, 32, 20), new THREE.MeshStandardMaterial({ color: 0x3b0f0f, roughness: 0.6 }));
     this.mouth.add(this.mouthInner);
     this.tongue = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 12), new THREE.MeshStandardMaterial({ color: 0xe0606a, roughness: 0.5 }));
     this.tongue.position.set(0, -0.1, 0.09); this.tongue.scale.set(1, 0.6, 1); this.mouthInner.add(this.tongue);
@@ -429,4 +427,20 @@ export class CartoonFace {
     this.mouth.position.y = this.mouth.userData.y0 + c.smile * 0.02 - c.jaw * 0.07;
     this.tongue.visible = c.jaw > 0.18;
   }
+}
+
+// ---------- Landmarks for fitting gear ----------
+export const BOTTOM = outerPoint(new THREE.Vector3(0, -1, 0)).y;
+export const NECK_Y = 0.42;                 // narrowest point between head and body
+export const EAR_Y = FACE.eyeY - 0.14;      // where headsets sit
+export const HEAD_CY = (TOP + NECK_Y) / 2;  // middle of the head lobe
+export const CHEST_Y = -0.2, BELLY_Y = -0.75, BELT_Y = -1.1;
+// map heights from the old one-piece potato's body (neck -0.32 .. bottom -1.34) onto the new body lobe
+export const by = y => NECK_Y - 0.08 + (y + 0.32) * ((NECK_Y - 0.08 - BOTTOM) / 1.02);
+
+// distance from the centre line to the potato's (smooth) surface at height y, along horizontal direction (sx, sz)
+export function bodyRadiusAt(y, sx, sz) {
+  const r = Math.max(1e-4, profileR(y)), d = depthAt(y), n = Math.hypot(sx, sz) || 1;
+  const ux = sx / n, uz = sz / n;
+  return 1 / Math.sqrt((ux / r) ** 2 + (uz / (r * d)) ** 2);
 }

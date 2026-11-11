@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { FACE, TOP, outerPoint, shapeNormal, surfaceAt, ringPoint, halfWidthAt, smooth, vnoise } from './tater.js';
+import { FACE, TOP, outerPoint, shapeNormal, surfaceAt, ringPoint, halfWidthAt, smooth, vnoise, by, NECK_Y, EAR_Y, HEAD_CY, BELT_Y, bodyRadiusAt, BOTTOM, CHEST_Y } from './tater.js';
 
 const TAU = Math.PI * 2, Z = new THREE.Vector3(0, 0, 1);
 
@@ -52,6 +52,86 @@ function detailTex(kind) {
   return (DETAIL[kind] = t);
 }
 // Give every solid material real surface detail based on what it's made of.
+
+// ---------- anti-clipping: keep every worn item outside the potato's skin ----------
+const RT_NY = 160, RT_NA = 96; let RTAB = null, RT_Y0 = 0, RT_Y1 = 0;
+function radiusTable() {
+  if (RTAB) return RTAB;
+  RT_Y0 = BOTTOM + 0.005; RT_Y1 = TOP - 0.005; RTAB = new Float32Array(RT_NY * RT_NA);
+  for (let j = 0; j < RT_NY; j++) { const y = RT_Y0 + (RT_Y1 - RT_Y0) * j / (RT_NY - 1);
+    for (let i = 0; i < RT_NA; i++) { const p = ringPoint(y, i / RT_NA * Math.PI * 2, 0); RTAB[j * RT_NA + i] = Math.hypot(p.x, p.z); } }
+  return RTAB;
+}
+// surface radius of the potato at height y in the horizontal direction of (x, z)
+function skinR(y, x, z) {
+  const t = radiusTable(); if (y <= RT_Y0 || y >= RT_Y1) return 0;
+  const fy = (y - RT_Y0) / (RT_Y1 - RT_Y0) * (RT_NY - 1), j = Math.min(RT_NY - 2, Math.floor(fy)), wy = fy - j;
+  let a = Math.atan2(x, z); if (a < 0) a += Math.PI * 2;
+  const fa = a / (Math.PI * 2) * RT_NA, i0 = Math.floor(fa) % RT_NA, i1 = (i0 + 1) % RT_NA, wa = fa - Math.floor(fa);
+  const r0 = t[j * RT_NA + i0] * (1 - wa) + t[j * RT_NA + i1] * wa, r1 = t[(j + 1) * RT_NA + i0] * (1 - wa) + t[(j + 1) * RT_NA + i1] * wa;
+  return r0 * (1 - wy) + r1 * wy;
+}
+// how far inside the skin a point is (positive = inside), approximated as a distance
+function skinDepth(x, y, z, gap) { const R = skinR(y, x, z); if (R <= 0) return -1; return (R + gap) - Math.hypot(x, z); }
+const _cm = new THREE.Matrix4(), _mi = new THREE.Matrix4(), _cv = new THREE.Vector3();
+// soft items (cloth, hats, straps): find how far the item sinks in at each height/angle, then push the whole
+// item outwards by that amount there, so inner and outer layers move together and keep their thickness
+const CF_NY = 64, CF_NA = 48, _cw = new THREE.Vector3(), _cr = new THREE.Vector3();
+export function conformSoft(root, gap = 0.012, space = root) {
+  space.updateMatrixWorld(true); const rootInv = new THREE.Matrix4().copy(space.matrixWorld).invert();
+  const meshes = []; root.traverse(o => { if (o.isMesh && !o.isInstancedMesh && !o.userData.noConform) meshes.push(o); });
+  if (!meshes.length) return root;
+  const y0 = BOTTOM - 0.05, y1 = TOP + 0.05, field = new Float32Array(CF_NY * CF_NA);
+  const cell = (x, y, z) => { let a = Math.atan2(x, z); if (a < 0) a += Math.PI * 2;
+    return [Math.max(0, Math.min(CF_NY - 1.001, (y - y0) / (y1 - y0) * (CF_NY - 1))), a / (Math.PI * 2) * CF_NA]; };
+  let any = false;
+  for (const o of meshes) { _cm.multiplyMatrices(rootInv, o.matrixWorld); const pos = o.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) { _cv.fromBufferAttribute(pos, i).applyMatrix4(_cm);
+      const d = skinDepth(_cv.x, _cv.y, _cv.z, gap); if (d <= 0) continue; any = true;
+      const [fy, fa] = cell(_cv.x, _cv.y, _cv.z), j = Math.round(fy), k = Math.round(fa) % CF_NA;
+      if (d > field[j * CF_NA + k]) field[j * CF_NA + k] = d; } }
+  if (!any) return root;
+  // spread the pushes to neighbouring cells so the cloth bends smoothly rather than creasing
+  for (let pass = 0; pass < 3; pass++) { const f2 = field.slice();
+    for (let j = 0; j < CF_NY; j++) for (let k = 0; k < CF_NA; k++) { let m = field[j * CF_NA + k];
+      for (const [dj, dk] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const jj = j + dj; if (jj < 0 || jj >= CF_NY) continue;
+        m = Math.max(m, field[jj * CF_NA + (k + dk + CF_NA) % CF_NA] * 0.8); }
+      f2[j * CF_NA + k] = m; }
+    field.set(f2); }
+  const sample = (fy, fa) => { const j = Math.min(CF_NY - 2, Math.floor(fy)), wy = fy - j, k0 = Math.floor(fa) % CF_NA, k1 = (k0 + 1) % CF_NA, wa = fa - Math.floor(fa);
+    return (field[j * CF_NA + k0] * (1 - wa) + field[j * CF_NA + k1] * wa) * (1 - wy) + (field[(j + 1) * CF_NA + k0] * (1 - wa) + field[(j + 1) * CF_NA + k1] * wa) * wy; };
+  for (const o of meshes) { _cm.multiplyMatrices(rootInv, o.matrixWorld); _mi.copy(_cm).invert();
+    const geo = o.geometry = o.geometry.clone(), pos = geo.attributes.position;
+    for (let i = 0; i < pos.count; i++) { _cv.fromBufferAttribute(pos, i).applyMatrix4(_cm);
+      const [fy, fa] = cell(_cv.x, _cv.y, _cv.z), push = sample(fy, fa); if (push <= 0) continue;
+      // on the head lobe push away from the head's centre (so crowns lift evenly), on the body push sideways
+      const hz = Math.hypot(_cv.x, _cv.z), w = smooth(NECK_Y, NECK_Y + 0.4, _cv.y);
+      _cw.set(hz > 1e-4 ? _cv.x / hz : 0, 0, hz > 1e-4 ? _cv.z / hz : 0).multiplyScalar(1 - w);
+      if (w > 0) { _cr.set(_cv.x, _cv.y - HEAD_CY, _cv.z).normalize().multiplyScalar(w); _cw.add(_cr); }
+      _cw.normalize(); _cv.addScaledVector(_cw, push / Math.max(0.35, Math.hypot(_cw.x, _cw.z)) * (1 - w) + push * w);
+      _cv.applyMatrix4(_mi); pos.setXYZ(i, _cv.x, _cv.y, _cv.z); }
+    pos.needsUpdate = true; geo.computeVertexNormals(); geo.computeBoundingSphere(); }
+  return root;
+}
+// rigid items (guns, radios): slide the whole thing forward (+z) or backward (-z) until nothing is inside
+export function conformRigid(obj, gap = 0.03, dir = 1) {
+  const parent = obj.parent; parent.updateMatrixWorld(true);
+  const pInv = new THREE.Matrix4().copy(parent.matrixWorld).invert(); let need = 0;
+  obj.traverse(o => {
+    if (!o.isMesh) return; _cm.multiplyMatrices(pInv, o.matrixWorld); const pos = o.geometry.attributes.position;
+    const step = Math.max(1, Math.floor(pos.count / 4000));
+    for (let i = 0; i < pos.count; i += step) {
+      _cv.fromBufferAttribute(pos, i).applyMatrix4(_cm); const R = skinR(_cv.y, _cv.x, _cv.z) + gap; if (R <= gap) continue;
+      if (Math.abs(_cv.x) >= R) continue;
+      // horizontal radius in this direction isn't round, so refine with the table along the line x = const
+      let lo = 0, hi = R * 1.6; for (let k = 0; k < 24; k++) { const m = (lo + hi) / 2; if (skinDepth(_cv.x, _cv.y, dir * m, gap) > 0) lo = m; else hi = m; }
+      const n = dir > 0 ? hi - _cv.z : _cv.z + hi; if (n > need && skinDepth(_cv.x, _cv.y, _cv.z, gap) > 0) need = n;
+    }
+  });
+  obj.position.z += dir * need;
+  return need;
+}
+
 function finishModel(root) {
   const seen = new Map();
   root.traverse(o => {
@@ -111,18 +191,37 @@ const patchTex = (text, bg, fg) => canvasTex(256, 128, (g, w, h) => {
 const tmpD = new THREE.Vector3(), tmpP = new THREE.Vector3();
 function conform(geo, k) {           // wrap a unit-sphere piece around the potato, k = how far out
   const p = geo.attributes.position;
-  for (let i = 0; i < p.count; i++) { tmpD.fromBufferAttribute(p, i).normalize(); outerPoint(tmpD, tmpP).multiplyScalar(k); p.setXYZ(i, tmpP.x, tmpP.y, tmpP.z); }
+  for (let i = 0; i < p.count; i++) { tmpD.fromBufferAttribute(p, i).normalize(); outK(outerPoint(dirAt(Math.acos(Math.max(-1, Math.min(1, tmpD.y))), Math.atan2(tmpD.z, -tmpD.x)), tmpP), k); p.setXYZ(i, tmpP.x, tmpP.y, tmpP.z); }
   geo.computeVertexNormals(); return geo;
 }
 const shell = (k, thetaLen, mat, t0 = 0) => new THREE.Mesh(conform(new THREE.SphereGeometry(1, 72, 40, 0, TAU, t0, thetaLen), k), mat);
-const dirAt = (theta, phi) => new THREE.Vector3(-Math.cos(phi) * Math.sin(theta), Math.cos(theta), Math.sin(phi) * Math.sin(theta));
+const dirRaw = (theta, phi) => new THREE.Vector3(-Math.cos(phi) * Math.sin(theta), Math.cos(theta), Math.sin(phi) * Math.sin(theta));
+// Head gear is designed in "head angles": theta = 0 is the crown, eyeTheta is eye level. These are turned into real
+// points on the head lobe by measuring the angle from the head's centre, so helmets and hats wrap the head like a person's.
+const HC = new THREE.Vector3(0, 0.95, 0);
+const _hp = new THREE.Vector3();
+const alphaFromHC = d => { outerPoint(d, _hp).sub(HC); return Math.acos(Math.max(-1, Math.min(1, _hp.y / _hp.length()))); };
+let ALPHA_EYE = null;
+function headAlpha(th) {
+  if (ALPHA_EYE === null) { const e = surfaceAt(0, FACE.eyeY, SMOOTH).p.sub(HC); ALPHA_EYE = Math.acos(e.y / e.length()); }
+  return th <= eyeTheta ? ALPHA_EYE * Math.pow(Math.max(0, th) / eyeTheta, 0.6) : ALPHA_EYE + (th - eyeTheta);
+}
+const DIR_CACHE = new Map();
+function dirAt(theta, phi) {
+  const key = Math.round(theta * 2000) + ':' + Math.round(phi * 2000), c = DIR_CACHE.get(key); if (c) return c.clone();
+  const target = Math.min(Math.PI - 0.01, headAlpha(theta)); let lo = 0, hi = Math.PI;
+  for (let i = 0; i < 22; i++) { const m = (lo + hi) / 2; if (alphaFromHC(dirRaw(m, phi)) < target) lo = m; else hi = m; }
+  const d = dirRaw((lo + hi) / 2, phi); if (DIR_CACHE.size < 200000) DIR_CACHE.set(key, d.clone()); return d;
+}
+// scale a head-surface point outwards from the head's centre (k = 1.1 means "a little off the skin")
+const outK = (p, k) => p.sub(HC).multiplyScalar(1 + (k - 1) * 1.15).add(HC);
 function ring(k, theta, tube, mat) {
-  const pts = []; for (let i = 0; i < 96; i++) pts.push(outerPoint(dirAt(theta, i / 96 * TAU)).multiplyScalar(k));
+  const pts = []; for (let i = 0; i < 96; i++) pts.push(outK(outerPoint(dirAt(theta, i / 96 * TAU)), k));
   return new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true), 160, tube, 8, true), mat);
 }
 function placeOn(mesh, k, dir, off = 0.01) {
-  const d = new THREE.Vector3(...dir).normalize(), n = shapeNormal(d, SMOOTH);
-  mesh.position.copy(outerPoint(d).multiplyScalar(k)).addScaledVector(n, off);
+  const d0 = new THREE.Vector3(...dir).normalize(), d = dirAt(Math.acos(d0.y), Math.atan2(d0.z, -d0.x)), n = shapeNormal(d, SMOOTH);
+  mesh.position.copy(outK(outerPoint(d), k)).addScaledVector(n, off);
   mesh.quaternion.setFromUnitVectors(Z, n); return mesh;
 }
 const onFace = (mesh, x, y, off) => { const s = surfaceAt(x, y, SMOOTH); mesh.position.copy(s.p).addScaledVector(s.n, off); mesh.quaternion.setFromUnitVectors(Z, s.n); return mesh; };
@@ -242,7 +341,7 @@ const HEAD = [
     const pa = cap.geometry.attributes.position, cols = [], pal = [0xe53935, 0xfdd835, 0x1e88e5, 0x43a047].map(c => new THREE.Color(c));
     for (let i = 0; i < pa.count; i++) { const a = Math.atan2(pa.getX(i), pa.getZ(i)); const c = pal[Math.floor((a + Math.PI) / (Math.PI / 2)) % 4]; cols.push(c.r, c.g, c.b); }
     cap.geometry.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3)); g.add(cap);
-    const edge = outerPoint(dirAt(th, Math.PI / 2)).multiplyScalar(1.07);
+    const edge = outK(outerPoint(dirAt(th, Math.PI / 2)), 1.07);
     const brim = new THREE.Mesh(new THREE.CircleGeometry(0.48, 32, 0, Math.PI), std(0x1e88e5, { side: THREE.DoubleSide }));
     brim.rotation.x = Math.PI / 2 - 0.15; brim.scale.set(1, 0.85, 1); brim.position.set(0, edge.y - 0.02, edge.z - 0.08); g.add(brim);
     const top = TOP * 1.07;
@@ -298,7 +397,7 @@ const HEAD = [
     const g = new THREE.Group(); const th = eyeTheta - 0.35;
     const steel = std(0x8c8f94, { metalness: 0.85, roughness: 0.38, side: THREE.DoubleSide }), bronze = std(0xb07a3a, { metalness: 0.9, roughness: 0.3 });
     g.add(shell(1.09, th, steel)); g.add(ring(1.09, th, 0.05, bronze));
-    const ridgePts = []; for (let i = 0; i <= 40; i++) ridgePts.push(outerPoint(dirAt(th * (i / 20 - 1), Math.PI / 2)).multiplyScalar(1.1));
+    const ridgePts = []; for (let i = 0; i <= 40; i++) ridgePts.push(outK(outerPoint(dirAt(th * (i / 20 - 1), Math.PI / 2)), 1.1));
     g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(ridgePts), 60, 0.04, 8), bronze));
     const ivory = std(0xefe6cf, { roughness: 0.5 });
     for (const sx of [-1, 1]) {
@@ -371,7 +470,7 @@ function headset(style) {
   const tactical = style === 'tactical';
   const g = new THREE.Group();
   const shellM = std(tactical ? 0x8b7653 : 0x18181c, { roughness: tactical ? 0.8 : 0.4, metalness: tactical ? 0 : 0.2 });
-  const cy = 0.3, cx = halfWidthAt(cy) + 0.09, rgb = [];
+  const cy = EAR_Y, cx = halfWidthAt(cy) + 0.09, rgb = [];
   for (const sx of [-1, 1]) {
     const cup = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.28, 0.17, 32), shellM); cup.rotation.z = Math.PI / 2; cup.position.set(sx * cx, cy, -0.02); g.add(cup);
     const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.23, 0.06, 32), std(tactical ? 0x5f5240 : 0x26262c)); cap.rotation.z = Math.PI / 2; cap.position.set(sx * (cx + 0.1), cy, -0.02); g.add(cap);
@@ -379,7 +478,7 @@ function headset(style) {
   }
   const b = new THREE.Mesh(new THREE.TorusGeometry(cx, 0.045, 10, 56, Math.PI), shellM); b.position.y = cy; b.scale.y = (TOP + 0.09 - cy) / cx; g.add(b);
   const mz = frontZ(FACE.mouthY);
-  const curve = new THREE.CatmullRomCurve3([[-cx - 0.04, 0.2, 0.1], [-cx + 0.05, -0.08, 0.45], [-0.55, FACE.mouthY - 0.12, mz - 0.05], [-0.32, FACE.mouthY - 0.08, mz + 0.06]].map(p => new THREE.Vector3(...p)));
+  const curve = new THREE.CatmullRomCurve3([[-cx - 0.04, cy - 0.15, 0.05], [-cx + 0.02, FACE.mouthY + 0.02, 0.3], [-0.42, FACE.mouthY - 0.06, mz - 0.06], [-0.22, FACE.mouthY - 0.05, mz + 0.05]].map(p => new THREE.Vector3(...p)));
   g.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 30, 0.02, 8), std(0x111111)));
   const foam = new THREE.Mesh(new THREE.SphereGeometry(0.065, 14, 10), std(0x111111, { roughness: 1 })); foam.position.copy(curve.getPoint(1)); g.add(foam);
   return { obj: g, update(st) { for (const { r, sx } of rgb) r.material.emissive.setHSL((st.t * 0.15 + (sx > 0 ? 0.5 : 0)) % 1, 1, 0.5); } };
@@ -392,12 +491,12 @@ const EARS = [
 // ======================= BODY (moves with the waist) =======================
 const BODY = [
   { id: 'foil', name: '✨ Foil Wrap', build() {
-    return { obj: band(-1.4, -0.5, 0.06, std(0xdde2e8, { metalness: 1, roughness: 0.32, side: THREE.DoubleSide, envMapIntensity: 1.4 }), true), update() {} };
+    return { obj: band(by(-1.4), by(-0.5), 0.06, std(0xdde2e8, { metalness: 1, roughness: 0.32, side: THREE.DoubleSide, envMapIntensity: 1.4 }), true), update() {} };
   } },
   { id: 'platecarrier', name: '🦺 Plate Carrier', build: () => armor({ tex: () => camoTex('#7b7356', ['#5f6b45', '#9a8a62', '#4a4232', '#c2b48a']), mags: 3, patch: ['TATER', '#2f3326', '#e0d29a'] }) },
   { id: 'chain', name: '⛓️ Gold Chain', build() {
     const g = new THREE.Group(); const au = gold(); const N = 52;
-    const pos = a => { const fr = Math.max(0, Math.cos(a)); return ringPoint(-0.4 - 0.3 * fr * fr, a, 0.045); };
+    const pos = a => { const fr = Math.max(0, Math.cos(a)); return ringPoint(NECK_Y - 0.08 - 0.5 * fr * fr, a, 0.045); };
     for (let i = 0; i < N; i++) {
       const a = i / N * TAU, p = pos(a), q = pos(a + 0.01);
       const link = new THREE.Mesh(new THREE.TorusGeometry(0.042, 0.014, 6, 14), au);
@@ -411,7 +510,7 @@ const BODY = [
   } },
   { id: 'bowtie', name: '🎀 Bow Tie', build() {
     const g = new THREE.Group(); const red = std(0xc0182c, { roughness: 0.45 });
-    const holder = onFace(new THREE.Group(), 0, -0.52, 0.05); g.add(holder);
+    const holder = new THREE.Group(); holder.position.copy(ringPoint(NECK_Y - 0.06, 0, 0.06)); g.add(holder);
     holder.add(new THREE.Mesh(new THREE.SphereGeometry(0.065, 16, 12), red));
     for (const s of [-1, 1]) { const w = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.28, 4), red); w.rotation.z = s * Math.PI / 2; w.position.x = s * 0.16; w.scale.set(1, 1, 0.45); holder.add(w); }
     let pj = 0; const j = spring(150, 8);
@@ -419,7 +518,7 @@ const BODY = [
   } },
   { id: 'scarf', name: '🧣 Scarf', build() {
     const g = new THREE.Group(); const mat = new THREE.MeshStandardMaterial({ map: stripeTex(['#2e5aa8', '#e9e2d0'], 6), roughness: 1 });
-    const y = -0.48; g.add(loop(y, 0.1, 0.13, mat));
+    const y = NECK_Y - 0.03; g.add(loop(y, 0.1, 0.13, mat));
     const tp = ringPoint(y - 0.05, 0.45, 0.16);
     const tailPivot = new THREE.Group(); tailPivot.position.copy(tp); g.add(tailPivot);
     const tail = new THREE.Mesh(RBox(0.24, 0.7, 0.07), mat); tail.position.y = -0.34; tailPivot.add(tail);
@@ -436,14 +535,14 @@ function cap(k, thetaOfPhi, mat, segU = 96, segV = 36) {
   const pos = [], uv = [], idx = [];
   for (let j = 0; j <= segV; j++) for (let i = 0; i <= segU; i++) {
     const phi = i / segU * TAU, th = thetaOfPhi(phi) * j / segV;
-    const p = outerPoint(dirAt(th, phi)).multiplyScalar(k); pos.push(p.x, p.y, p.z); uv.push(i / segU * 3, j / segV * 1.5);
+    const p = outK(outerPoint(dirAt(th, phi)), k); pos.push(p.x, p.y, p.z); uv.push(i / segU * 3, j / segV * 1.5);
   }
   for (let j = 0; j < segV; j++) for (let i = 0; i < segU; i++) { const a = j * (segU + 1) + i, b = a + segU + 1; idx.push(a, a + 1, b, b, a + 1, b + 1); }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx); g.computeVertexNormals();
   return new THREE.Mesh(g, mat);
 }
 function capEdge(k, thetaOfPhi, tube, mat) {
-  const pts = []; for (let i = 0; i < 128; i++) { const phi = i / 128 * TAU; pts.push(outerPoint(dirAt(thetaOfPhi(phi), phi)).multiplyScalar(k)); }
+  const pts = []; for (let i = 0; i < 128; i++) { const phi = i / 128 * TAU; pts.push(outK(outerPoint(dirAt(thetaOfPhi(phi), phi)), k)); }
   return new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true), 200, tube, 8, true), mat);
 }
 // phi = PI/2 is the front of the face, 3PI/2 the back
@@ -493,7 +592,7 @@ function akMag(mat) {   // curved AK magazine
 const MIL_HEAD = [
   { id: 'fishbowl', name: '🐠 Fishbowl Helmet (upside down)', build() {
     const g = new THREE.Group(), bowl = new THREE.Group(); g.add(bowl);
-    const R = 1.42, cy = 0.2, yOpen = FACE.mouthY - 0.5, rb = 0.6, yTop = cy + Math.sqrt(R * R - rb * rb);
+    const R = 1.05, cy = HEAD_CY, yOpen = NECK_Y - 0.12, rb = 0.45, yTop = cy + Math.sqrt(R * R - rb * rb);
     const prof = (off) => { const pts = []; for (let i = 0; i <= 48; i++) { const y = yOpen + (yTop - yOpen) * i / 48; pts.push(new THREE.Vector2(Math.sqrt(Math.max(0, R * R - (y - cy) ** 2)) + off, y)); } return pts; };
     const glassMat = new THREE.MeshPhysicalMaterial({ color: 0xf2fbf8, transparent: true, opacity: 0.14, roughness: 0.02, metalness: 0, clearcoat: 1, clearcoatRoughness: 0, specularIntensity: 1, envMapIntensity: 3, side: THREE.DoubleSide, depthWrite: false });
     const outer = new THREE.Mesh(new THREE.LatheGeometry(prof(0), 96), glassMat); outer.renderOrder = 6; bowl.add(outer);
@@ -546,7 +645,7 @@ const MIL_HEAD = [
     const th = eyeTheta - 0.42; g.add(shell(1.07, th, cloth));
     const pos = [], idx = [], uv = [], U = 96, Vn = 6;
     for (let j = 0; j <= Vn; j++) for (let i = 0; i <= U; i++) {
-      const phi = i / U * TAU, t = j / Vn, e = outerPoint(dirAt(th, phi)).multiplyScalar(1.07);
+      const phi = i / U * TAU, t = j / Vn, e = outK(outerPoint(dirAt(th, phi)), 1.07);
       const hz = Math.hypot(e.x, e.z) || 1, out = 0.42 * t, droop = -0.18 * t * t * (0.7 + 0.3 * Math.sin(phi * 3 + 1));
       pos.push(e.x + e.x / hz * out, e.y + droop, e.z + e.z / hz * out); uv.push(i / U * 4, t);
     }
@@ -573,7 +672,7 @@ const MIL_HEAD = [
     const groups = Array.from({ length: 6 }, () => { const p = new THREE.Group(); g.add(p); return p; });
     const lim = phi => eyeTheta - 0.25 + 0.9 * (1 - frontness(phi));
     for (let i = 0; i < 340; i++) {
-      const phi = rnd() * TAU, th = rnd() ** 0.8 * lim(phi), d = dirAt(th, phi), p = outerPoint(d).multiplyScalar(1.03);
+      const phi = rnd() * TAU, th = rnd() ** 0.8 * lim(phi), d = dirAt(th, phi), p = outK(outerPoint(d), 1.03);
       const n = shapeNormal(d, SMOOTH), len = 0.22 + rnd() * 0.32;
       const strand = new THREE.Mesh(new THREE.ConeGeometry(0.03 + rnd() * 0.025, len, 4), mats[i % mats.length]);
       const dir = n.clone().multiplyScalar(0.35).add(new THREE.Vector3(0, -1, 0)).normalize();
@@ -644,7 +743,7 @@ const MIL_BODY = [
   { id: 'chestrig', name: '🎽 AK Chest Rig', build() {
     const g = new THREE.Group(); const cloth = new THREE.MeshStandardMaterial({ map: woodlandTex(), roughness: 1 });
     const strap = std(0x3b3a2a, { roughness: 1 });
-    const y = -0.78, zf = ringPoint(y, 0, 0.07).z;
+    const y = by(-0.78), zf = ringPoint(y, 0, 0.07).z;
     const panel = new THREE.Mesh(RBox(0.98, 0.42, 0.14), cloth); panel.position.set(0, y, zf + 0.03); g.add(panel);
     const magMat = std(0x3a2a1c, { roughness: 0.5, metalness: 0.15 });
     for (let i = 0; i < 4; i++) {
@@ -654,7 +753,7 @@ const MIL_BODY = [
     }
     g.add(loop(y + 0.12, 0.07, 0.035, strap));
     for (const sx of [-1, 1]) {   // shoulder straps up the sides
-      const pts = [ringPoint(y + 0.15, sx * 0.5, 0.07), ringPoint(-0.3, sx * 0.9, 0.06), ringPoint(-0.05, sx * 1.6, 0.05), ringPoint(y + 0.12, sx * 2.6, 0.07)];
+      const pts = [ringPoint(y + 0.15, sx * 0.5, 0.07), ringPoint(NECK_Y - 0.25, sx * 0.75, 0.06), ringPoint(NECK_Y - 0.05, sx * 1.6, 0.05), ringPoint(y + 0.12, sx * 2.6, 0.07)];
       g.add(ribbon(pts, 0.09, strap, 0.02));
     }
     const flag = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.18), new THREE.MeshStandardMaterial({ map: patchTex('MGAS', '#3d4a2a', '#e8dcb0'), roughness: 0.9 }));
@@ -663,7 +762,7 @@ const MIL_BODY = [
   } },
   { id: 'bandolier', name: '🧨 Shotgun Shell Bandolier', build() {
     const g = new THREE.Group(); const leather = std(0x5a3a20, { roughness: 0.8 });
-    const path = a => ringPoint(-0.75 + 0.3 * Math.sin(a + 0.6), a, 0.07);
+    const path = a => ringPoint(by(-0.75) + 0.45 * Math.sin(a + 0.6), a, 0.07);
     const pts = []; for (let i = 0; i < 64; i++) pts.push(path(i / 64 * TAU));
     g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true), 160, 0.05, 8, true), leather));
     const red = std(0xa11b1b, { roughness: 0.5 }), brass = std(0xd8b04a, { metalness: 1, roughness: 0.3 });
@@ -680,7 +779,7 @@ const MIL_BODY = [
 const MIL_NECK = [
   { id: 'dogtags', name: '🏷️ Dog Tags', build() {
     const g = new THREE.Group(); const steel = std(0xc8ccd2, { metalness: 1, roughness: 0.3 });
-    const pos = a => { const fr = Math.max(0, Math.cos(a)); return ringPoint(-0.42 - 0.22 * fr * fr, a, 0.04); };
+    const pos = a => { const fr = Math.max(0, Math.cos(a)); return ringPoint(NECK_Y - 0.05 - 0.4 * fr * fr, a, 0.04); };
     const pts = []; for (let i = 0; i < 64; i++) pts.push(pos(i / 64 * TAU));
     g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true), 160, 0.008, 6, true), steel));
     const piv = new THREE.Group(); piv.position.copy(pos(0)); g.add(piv);
@@ -693,9 +792,9 @@ const MIL_NECK = [
   } },
   { id: 'shemagh', name: '🧣 Shemagh', build() {
     const g = new THREE.Group(); const mat = new THREE.MeshStandardMaterial({ map: checkTex('#c9b88e', '#2b2620'), roughness: 1 });
-    g.add(band(-0.62, -0.32, 0.1, mat));
-    g.add(loop(-0.36, 0.12, 0.08, mat));
-    const tp = ringPoint(-0.5, -0.5, 0.18), piv = new THREE.Group(); piv.position.copy(tp); g.add(piv);
+    g.add(band(NECK_Y - 0.3, NECK_Y + 0.02, 0.1, mat));
+    g.add(loop(NECK_Y - 0.02, 0.12, 0.08, mat));
+    const tp = ringPoint(NECK_Y - 0.18, -0.5, 0.18), piv = new THREE.Group(); piv.position.copy(tp); g.add(piv);
     const tail = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.55, 3), mat); tail.position.y = -0.27; tail.rotation.y = 0.5; piv.add(tail);
     const sw = spring(40, 3);
     return { obj: g, update(st) { piv.rotation.z = -0.1 + sw.step(st.dt, 0, -st.drot.z * 0.2 - st.drot.y * 0.08 + st.kick * 0.3); } };
@@ -703,7 +802,7 @@ const MIL_NECK = [
 ];
 const MIL_BACK = [
   { id: 'radio', name: '📻 Radio Pack + Antenna', build() {
-    const g = new THREE.Group(); const y = -0.6, zb = ringPoint(y, Math.PI, 0.05).z;
+    const g = new THREE.Group(); const y = by(-0.6), zb = ringPoint(y, Math.PI, 0.05).z;
     const pack = new THREE.Mesh(RBox(0.62, 0.62, 0.3), std(0x4c513a, { roughness: 0.9 })); pack.position.set(0.05, y, zb - 0.15); g.add(pack);
     const radio = new THREE.Mesh(RBox(0.4, 0.28, 0.12), std(0x2a2c26, { roughness: 0.6, metalness: 0.2 })); radio.position.set(0.05, y + 0.2, zb - 0.32); g.add(radio);
     const ant = new THREE.Group(); ant.position.set(0.25, y + 0.34, zb - 0.28); g.add(ant);
@@ -752,7 +851,7 @@ function hairBase(accept, color, k = 1.012) {
   const geo = new THREE.SphereGeometry(1, 180, 130), pa = geo.attributes.position, d = new THREE.Vector3(), keepV = [];
   for (let i = 0; i < pa.count; i++) {
     d.fromBufferAttribute(pa, i).normalize(); const p = outerPoint(d); const az = Math.atan2(p.x, p.z);
-    keepV.push(!!accept(p, az)); p.multiplyScalar(k); pa.setXYZ(i, p.x, p.y, p.z);
+    keepV.push(!!accept(p, az)); outK(p, k); pa.setXYZ(i, p.x, p.y, p.z);
   }
   const old = geo.index.array, idx = [];
   for (let i = 0; i < old.length; i += 3) if (keepV[old[i]] && keepV[old[i + 1]] && keepV[old[i + 2]]) idx.push(old[i], old[i + 1], old[i + 2]);
@@ -951,17 +1050,40 @@ function m4Rifle() {
   const vfg = box(0.04, 0.1, 0.04, blk, 0.5, -0.09, 0, g);
   return g;
 }
-function slungGun(make, side = 1) {   // rifle hanging diagonally across the back
-  const g = new THREE.Group(), y = -0.55, zb = ringPoint(y, Math.PI, 0.05).z;
-  const gun = make(); gun.scale.setScalar(1.1); gun.position.set(0, y, zb - 0.12); gun.rotation.set(0, Math.PI, side * 0.75); g.add(gun);
-  const pts = [ringPoint(-0.95, side * 2.4, 0.06), ringPoint(-0.6, side * 1.0, 0.07), ringPoint(-0.25, side * -0.6 + Math.PI * 0, 0.06), ringPoint(-0.15, side * -2.0, 0.06), ringPoint(-0.2, Math.PI, 0.08)];
-  g.add(ribbon(pts, 0.06, std(0x2b2a22, { roughness: 0.95 }), 0.012));
-  const sw = spring(30, 3);
-  return { obj: g, update(st) { gun.rotation.z = side * 0.75 + sw.step(st.dt, 0, -st.drot.z * 0.05 - st.drot.y * 0.03 + st.kick * 0.3); } };
+// rifle on a two-point sling, hanging diagonally across the front of the chest (muzzle down, stock by the shoulder)
+const SLING_Y = -0.3, SLING_TILT = 0.62;
+function chestSling(g, pivot, side, len, whenReady) {
+  pivot.position.set(0, SLING_Y, ringPoint(SLING_Y, 0, 0).z + 0.08); pivot.rotation.set(0, 0, side * SLING_TILT);
+  const strapMat = std(0x2b2a22, { roughness: 0.95 });
+  let baseZ = pivot.position.z, strap = null, vestZ = 0;
+  const build = () => {
+    pivot.position.z = ringPoint(SLING_Y, 0, 0).z; pivot.updateMatrixWorld(true);
+    conformRigid(pivot, 0.06, 1); pivot.updateMatrixWorld(true); baseZ = pivot.position.z;
+    const end = s => pivot.localToWorld(new THREE.Vector3(s * len * 0.42, 0.03, -0.02)).applyMatrix4(new THREE.Matrix4().copy(g.matrixWorld).invert());
+    const up = end(-side), down = end(side);   // stock end (high), muzzle end (low)
+    const pts = [up, ringPoint(NECK_Y - 0.12, -side * 0.75, 0.05), ringPoint(NECK_Y - 0.02, -side * 1.6, 0.04), ringPoint(NECK_Y - 0.22, Math.PI, 0.05),
+      ringPoint(by(-0.85), side * 1.9, 0.05), ringPoint(by(-0.95), side * 1.1, 0.06), down];
+    strap = new THREE.Group(); strap.add(ribbon(pts, 0.065, strapMat, 0.012)); g.add(strap); conformSoft(strap, 0.02, g);
+  };
+  whenReady ? whenReady(build) : build();
+  const sw = spring(26, 3.2);
+  return { update(st) {
+    // when a vest/plate carrier is worn the rifle rides on top of it instead of on the potato
+    vestZ += ((st.vest ? 0.15 : 0) - vestZ) * Math.min(1, st.dt * 10);
+    pivot.position.z = baseZ + vestZ; if (strap) strap.position.z = vestZ * 0.6;
+    pivot.rotation.z = side * SLING_TILT + sw.step(st.dt, 0, -st.drot.z * 0.05 - st.drot.y * 0.03 + st.kick * 0.25);
+  } };
+}
+function slungGun(make, side = 1) {
+  const g = new THREE.Group(), pivot = new THREE.Group(); g.add(pivot);
+  const gun = make(); gun.scale.setScalar(1.3); pivot.add(gun);
+  const b = new THREE.Box3().setFromObject(gun), c = b.getCenter(new THREE.Vector3()); gun.position.sub(c);
+  const ex = chestSling(g, pivot, side, b.getSize(new THREE.Vector3()).x);
+  return { obj: g, update: ex.update };
 }
 function headset2({ shellColor, capColor, slim = false, mic = true, cable = false }) {
   const g = new THREE.Group(), sh = std(shellColor, { roughness: 0.7 }), cp = std(capColor, { roughness: 0.7 });
-  const cy = 0.3, cx = halfWidthAt(cy) + 0.08;
+  const cy = EAR_Y, cx = halfWidthAt(cy) + 0.08;
   for (const sx of [-1, 1]) {
     const cup = cyl(slim ? 0.22 : 0.27, slim ? 0.23 : 0.29, slim ? 0.11 : 0.17, sh, g, 28); cup.rotation.z = Math.PI / 2; cup.position.set(sx * cx, cy, -0.02);
     if (slim) cup.scale.set(1, 1, 1.35);
@@ -972,14 +1094,14 @@ function headset2({ shellColor, capColor, slim = false, mic = true, cable = fals
   const b = new THREE.Mesh(new THREE.TorusGeometry(cx, 0.04, 10, 56, Math.PI), sh); b.position.y = cy; b.scale.y = (TOP + 0.08 - cy) / cx; g.add(b);
   if (mic) {
     const mz = frontZ(FACE.mouthY);
-    const curve = new THREE.CatmullRomCurve3([[cx + 0.04, 0.2, 0.1], [cx - 0.05, -0.08, 0.45], [0.5, FACE.mouthY - 0.12, mz - 0.05], [0.3, FACE.mouthY - 0.08, mz + 0.06]].map(p => new THREE.Vector3(...p)));
+    const curve = new THREE.CatmullRomCurve3([[cx + 0.04, cy - 0.15, 0.05], [cx - 0.02, FACE.mouthY + 0.02, 0.3], [0.42, FACE.mouthY - 0.06, mz - 0.06], [0.22, FACE.mouthY - 0.05, mz + 0.05]].map(p => new THREE.Vector3(...p)));
     g.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 30, 0.018, 8), blackMat()));
     const foam = new THREE.Mesh(new THREE.SphereGeometry(0.06, 14, 10), blackMat({ roughness: 1 })); foam.position.copy(curve.getPoint(1)); g.add(foam);
   }
-  if (cable) { const c = new THREE.CatmullRomCurve3([[-cx, cy - 0.25, -0.05], [-cx + 0.1, -0.4, 0.1], [-0.5, -0.9, 0.4]].map(p => new THREE.Vector3(...p))); g.add(new THREE.Mesh(new THREE.TubeGeometry(c, 20, 0.015, 6), blackMat())); }
+  if (cable) { const c = new THREE.CatmullRomCurve3([[-cx, cy - 0.25, -0.05], [-cx + 0.1, NECK_Y - 0.1, 0.1], [-0.5, by(-0.9), 0.45]].map(p => new THREE.Vector3(...p))); g.add(new THREE.Mesh(new THREE.TubeGeometry(c, 20, 0.015, 6), blackMat())); }
   return { obj: g, update() {} };
 }
-function armor({ tex, color, collar = false, shoulders = false, mags = 0, pistolMag = false, admin = false, patch = null, low = -1.2, high = -0.4, bulk = 0.1 }) {
+function armor({ tex, color, collar = false, shoulders = false, mags = 0, pistolMag = false, admin = false, patch = null, low = -1.05, high = NECK_Y - 0.12, bulk = 0.1 }) {
   const g = new THREE.Group();
   const cloth = tex ? new THREE.MeshStandardMaterial({ map: tex(), roughness: 0.95, side: THREE.DoubleSide }) : std(color, { roughness: 0.95, side: THREE.DoubleSide });
   const dark = tex ? std(0x2a2a24, { roughness: 0.95 }) : std(new THREE.Color(color).multiplyScalar(0.6), { roughness: 0.95 });
@@ -1027,7 +1149,7 @@ function armor({ tex, color, collar = false, shoulders = false, mags = 0, pistol
   return { obj: g, update() {} };
 }
 function backpack({ tex, color, w = 0.7, h = 0.85, d = 0.38, bedroll = false, frame = false }) {
-  const g = new THREE.Group(), y = -0.55, zb = ringPoint(y, Math.PI, 0.05).z;
+  const g = new THREE.Group(), y = by(-0.55), zb = ringPoint(y, Math.PI, 0.05).z;
   const mat = tex ? new THREE.MeshStandardMaterial({ map: tex(), roughness: 1 }) : std(color, { roughness: 0.95 });
   const body = new THREE.Mesh(RBox(w, h, d, 3, 3, 3), mat); body.position.set(0, y + 0.1, zb - d / 2 - 0.02);
   const p = body.geometry.attributes.position; for (let i = 0; i < p.count; i++) { const x = p.getX(i), yy = p.getY(i), z = p.getZ(i); p.setXYZ(i, x * (1 - 0.08 * (yy / h + 0.5)), yy, z * (0.85 + 0.15 * Math.cos(x / w * 2))); } body.geometry.computeVertexNormals(); g.add(body);
@@ -1069,7 +1191,7 @@ const TK_HEAD = [
     const g = new THREE.Group(); const tan = new THREE.MeshStandardMaterial({ map: tanTex(), roughness: 0.8, side: THREE.DoubleSide });
     const edge = helmetEdge(eyeTheta - 0.35, eyeTheta - 0.15, eyeTheta + 0.1);
     g.add(cap(1.1, edge, tan)); g.add(capEdge(1.1, edge, 0.03, std(0x4a3f2c)));
-    for (let i = -2; i <= 2; i++) { const pts = []; for (let k = 0; k <= 20; k++) pts.push(outerPoint(dirAt(0.15 + k / 20 * (eyeTheta - 0.5), Math.PI / 2 + i * 0.35)).multiplyScalar(1.115)); g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 30, 0.02, 6), std(0x9a8462, { roughness: 0.8 }))); }
+    for (let i = -2; i <= 2; i++) { const pts = []; for (let k = 0; k <= 20; k++) pts.push(outK(outerPoint(dirAt(0.15 + k / 20 * (eyeTheta - 0.5), Math.PI / 2 + i * 0.35)), 1.115)); g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 30, 0.02, 6), std(0x9a8462, { roughness: 0.8 }))); }
     for (const sx of [-1, 1]) g.add(placeOn(new THREE.Mesh(RBox(0.5, 0.08, 0.05), std(0x6a5a40)), 1.1, [sx, 0.45, 0.1], 0.03));
     return { obj: g, update() {} };
   } },
@@ -1096,10 +1218,10 @@ const TK_HEAD = [
   { id: 'ushanka', name: '🧸 Ushanka Fur Hat', build() {
     const g = new THREE.Group(); const fur = std(0x5a4632, { roughness: 1 }), wool = std(0x3c4a3a, { roughness: 1, side: THREE.DoubleSide });
     const th = eyeTheta - 0.35; g.add(shell(1.09, th, wool));
-    const brimPts = []; for (let i = 0; i < 64; i++) brimPts.push(outerPoint(dirAt(th, i / 64 * TAU)).multiplyScalar(1.12));
+    const brimPts = []; for (let i = 0; i < 64; i++) brimPts.push(outK(outerPoint(dirAt(th, i / 64 * TAU)), 1.12));
     g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(brimPts, true), 128, 0.11, 12, true), fur));
     const flaps = [];
-    for (const sx of [-1, 1]) { const piv = new THREE.Group(); piv.position.copy(outerPoint(dirAt(th, sx > 0 ? 0 : Math.PI)).multiplyScalar(1.13)); g.add(piv); const f = new THREE.Mesh(new THREE.SphereGeometry(0.28, 18, 14), fur); f.scale.set(0.35, 1.1, 0.9); f.position.set(sx * 0.03, -0.28, 0); piv.add(f); flaps.push({ piv, sx, s: spring(40, 3) }); }
+    for (const sx of [-1, 1]) { const piv = new THREE.Group(); piv.position.copy(outK(outerPoint(dirAt(th, sx > 0 ? 0 : Math.PI)), 1.13)); g.add(piv); const f = new THREE.Mesh(new THREE.SphereGeometry(0.28, 18, 14), fur); f.scale.set(0.35, 1.1, 0.9); f.position.set(sx * 0.03, -0.28, 0); piv.add(f); flaps.push({ piv, sx, s: spring(40, 3) }); }
     const badge = new THREE.Mesh(new THREE.CircleGeometry(0.06, 5), std(0xd0a020, { metalness: 0.8, roughness: 0.3 })); placeOn(badge, 1.2, [0, 0.62, 0.78], 0.02); g.add(badge);
     return { obj: g, update(st) { for (const f of flaps) f.piv.rotation.z = f.sx * (0.08 + f.s.step(st.dt, 0, -st.drot.z * 0.08 * f.sx - st.drot.y * 0.04 + st.kick * 0.3 + st.jaw * 0.02)); } };
   } },
@@ -1107,15 +1229,15 @@ const TK_HEAD = [
     const g = new THREE.Group(); const leather = std(0x2a2620, { roughness: 0.75, side: THREE.DoubleSide });
     const edge = helmetEdge(eyeTheta - 0.3, eyeTheta + 0.35, eyeTheta + 0.3);
     g.add(cap(1.08, edge, leather));
-    for (let i = -2; i <= 2; i++) { const pts = []; for (let k = 0; k <= 24; k++) pts.push(outerPoint(dirAt(-0.9 + k / 24 * 1.8, i * 0.32 + 0.0001)).multiplyScalar(1.1)); }
-    for (let i = -3; i <= 3; i++) { const pts = []; for (let k = 0; k <= 24; k++) { const th = (k / 24) * (eyeTheta - 0.3); pts.push(outerPoint(dirAt(th, Math.PI / 2 + i * 0.3)).multiplyScalar(1.1)); } g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 30, 0.045, 8), leather)); }
+    for (let i = -2; i <= 2; i++) { const pts = []; for (let k = 0; k <= 24; k++) pts.push(outK(outerPoint(dirAt(-0.9 + k / 24 * 1.8, i * 0.32 + 0.0001)), 1.1)); }
+    for (let i = -3; i <= 3; i++) { const pts = []; for (let k = 0; k <= 24; k++) { const th = (k / 24) * (eyeTheta - 0.3); pts.push(outK(outerPoint(dirAt(th, Math.PI / 2 + i * 0.3)), 1.1)); } g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 30, 0.045, 8), leather)); }
     for (const sx of [-1, 1]) { const e = cyl(0.15, 0.15, 0.08, leather, g, 20); e.rotation.z = Math.PI / 2; e.position.copy(ringPoint(FACE.eyeY - 0.05, sx * Math.PI / 2, 0.08)); }
     return { obj: g, update() {} };
   } },
   { id: 'bandana', name: '🏴 Bandana Headwrap', build() {
     const g = new THREE.Group(); const mat = new THREE.MeshStandardMaterial({ map: checkTex('#1a1a1a', '#3a3a3a'), roughness: 1, side: THREE.DoubleSide });
     g.add(shell(1.05, eyeTheta - 0.32, mat));
-    const knot = new THREE.Group(); knot.position.copy(outerPoint(dirAt(eyeTheta - 0.4, -Math.PI / 2)).multiplyScalar(1.06)); g.add(knot);
+    const knot = new THREE.Group(); knot.position.copy(outK(outerPoint(dirAt(eyeTheta - 0.4, -Math.PI / 2)), 1.06)); g.add(knot);
     const tails = [0.3, -0.3].map(r => { const t = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.35, 3), mat); t.position.y = -0.17; t.rotation.z = r; const p = new THREE.Group(); p.add(t); knot.add(p); return p; });
     const sw = spring(40, 3);
     return { obj: g, update(st) { const x = sw.step(st.dt, 0, -st.drot.y * 0.08 + st.kick * 0.3); tails.forEach((p, i) => p.rotation.x = x * (i ? 1 : 0.7)); } };
@@ -1123,7 +1245,7 @@ const TK_HEAD = [
   { id: 'backcap', name: '🧢 Backwards Ball Cap', build() {
     const g = new THREE.Group(); const c = std(0x2d3a2a, { roughness: 0.95, side: THREE.DoubleSide });
     const th = eyeTheta - 0.5; g.add(shell(1.06, th, c));
-    const e = outerPoint(dirAt(th, -Math.PI / 2)).multiplyScalar(1.06);
+    const e = outK(outerPoint(dirAt(th, -Math.PI / 2)), 1.06);
     const bill = new THREE.Mesh(new THREE.CircleGeometry(0.45, 32, 0, Math.PI), c); bill.rotation.x = -Math.PI / 2 + 0.15; bill.rotation.z = Math.PI; bill.scale.set(1, 0.85, 1); bill.position.set(0, e.y - 0.02, e.z + 0.08); g.add(bill);
     const patch = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.12), new THREE.MeshStandardMaterial({ map: patchTex('MGAS', '#2d3a2a', '#d8c690'), roughness: 0.9 })); placeOn(patch, 1.065, [0, 0.55, 0.83], 0.005); g.add(patch);
     return { obj: g, update() {} };
@@ -1221,19 +1343,19 @@ const TK_EARS = [
 const TK_BODY = [
   { id: 'slick', name: '⬛ LBT Slick Plate Carrier', build: () => armor({ color: 0x232426, mags: 3, patch: ['USEC', '#232426', '#c8c8c8'] }) },
   { id: 'slicktan', name: '🟫 Slick Carrier (tan)', build: () => armor({ tex: tanTex, mags: 3, admin: true, patch: ['TATER', '#8a7350', '#2a2418'] }) },
-  { id: 'thor', name: '🛡️ Thor Heavy Armor', build: () => armor({ color: 0x3d4244, collar: true, shoulders: true, mags: 2, bulk: 0.14, low: -1.25, high: -0.32, patch: ['THOR', '#2d3234', '#9aa0a2'] }) },
-  { id: 'gzhel', name: '🇷🇺 Gzhel-K Body Armor', build: () => armor({ tex: flora, collar: true, mags: 0, bulk: 0.13, low: -1.25, high: -0.35, patch: ['BEAR', '#4a5a32', '#e0d8a0'] }) },
+  { id: 'thor', name: '🛡️ Thor Heavy Armor', build: () => armor({ color: 0x3d4244, collar: true, shoulders: true, mags: 2, bulk: 0.14, low: -1.15, high: NECK_Y - 0.082, patch: ['THOR', '#2d3234', '#9aa0a2'] }) },
+  { id: 'gzhel', name: '🇷🇺 Gzhel-K Body Armor', build: () => armor({ tex: flora, collar: true, mags: 0, bulk: 0.13, low: -1.12, high: NECK_Y - 0.1, patch: ['BEAR', '#4a5a32', '#e0d8a0'] }) },
   { id: 'jpc', name: '🎯 JPC + Mags (multicam)', build: () => armor({ tex: multicamTex, mags: 3, pistolMag: true, admin: true, patch: ['MGAS', '#6f6a44', '#e8dcb0'] }) },
   { id: 'atacs', name: '🌫️ A-TACS Plate Carrier', build: () => armor({ tex: atacsTex, mags: 4, patch: ['USEC', '#5d5a4c', '#e8e4d0'] }) },
 ];
 
 const TK_NECK = [
-  { id: 'gaiter', name: '🧣 Camo Neck Gaiter', build() { const g = new THREE.Group(); g.add(band(-0.6, -0.32, 0.07, new THREE.MeshStandardMaterial({ map: multicamTex(), roughness: 1, side: THREE.DoubleSide }))); return { obj: g, update() {} }; } },
+  { id: 'gaiter', name: '🧣 Camo Neck Gaiter', build() { const g = new THREE.Group(); g.add(band(NECK_Y - 0.28, NECK_Y + 0.05, 0.07, new THREE.MeshStandardMaterial({ map: multicamTex(), roughness: 1, side: THREE.DoubleSide }))); return { obj: g, update() {} }; } },
 ];
 
 const TK_BACK = [
-  { id: 'ak', name: '🔫 AK-74 Slung on Back', build: () => slungGun(akRifle, 1) },
-  { id: 'm4', name: '🔫 M4A1 Slung on Back', build: () => slungGun(m4Rifle, -1) },
+  { id: 'ak', name: '🔫 AK-74 Chest Sling', build: () => slungGun(akRifle, 1) },
+  { id: 'm4', name: '🔫 M4A1 Chest Sling', build: () => slungGun(m4Rifle, -1) },
   { id: 'pilgrim', name: '🎒 Pilgrim Backpack + Bedroll', build: () => backpack({ color: 0x4a5a3a, w: 0.8, h: 0.95, d: 0.42, bedroll: true, frame: true }) },
   { id: 'blackjack', name: '🎒 Blackjack 50 (black)', build: () => backpack({ color: 0x1f2022, w: 0.72, h: 0.88, d: 0.4 }) },
   { id: 'trizip', name: '🎒 Tri-Zip Pack (tan)', build: () => backpack({ tex: tanTex, w: 0.68, h: 0.8, d: 0.36 }) },
@@ -1288,7 +1410,7 @@ function furShells({ field, palette, layers = 28, droop = 0.6, comb = null, dens
   const base = [], nrm = [], mask = [], lens = [], uvs = [], idx = [];
   for (let j = 0; j <= nv; j++) for (let i = 0; i <= nu; i++) {
     const phi = phiRange[0] + (phiRange[1] - phiRange[0]) * i / nu, th = thetaRange[0] + (thetaRange[1] - thetaRange[0]) * j / nv;
-    const d = dirAt(th, phi), p = outerPoint(d), n = shapeNormal(d, SMOOTH), az = Math.atan2(p.x, p.z);
+    const d = dirRaw(th, phi), p = outerPoint(d), n = shapeNormal(d, SMOOTH), az = Math.atan2(p.x, p.z);
     const f = field(p, az) || { m: 0, len: 0 };
     base.push(p); nrm.push(n); mask.push(f.m); lens.push(f.len || 0);
     uvs.push(phi * 0.42 * density / 10, (Math.cos(th)) * 0.55 * density / 10);
@@ -1329,7 +1451,7 @@ function furShells({ field, palette, layers = 28, droop = 0.6, comb = null, dens
 // smooth coverage helpers
 const soft = (v, edge = 0.04) => sstep(-edge, edge, v);   // v > 0 inside
 const mouthHole = (x, y) => Math.hypot(x / (MOUTH.rx + 0.02), (y - FACE.mouthY) / (MOUTH.ry + 0.02)) - 1;
-function beardField({ len, under = 0, chinY = FACE.mouthY - 0.62, stache = true, sides = true }) {
+function beardField({ len, under = 0, chinY = NECK_Y + 0.02, stache = true, sides = true }) {
   return (p, az) => {
     const A = Math.abs(az); if (A > 2.15) return null;
     const u = Math.abs(p.x), side = sstep(0.55, 1.5, A);
@@ -1338,7 +1460,9 @@ function beardField({ len, under = 0, chinY = FACE.mouthY - 0.62, stache = true,
     let m = soft(top - p.y, 0.035) * soft(mouthHole(p.x, p.y), 0.04);
     if (!stache && p.y > FACE.mouthY && u < 0.35) m *= soft(-(p.y - FACE.mouthY - 0.02), 0.03);
     if (!sides) m *= soft(2.1 - A - 0.5, 0.1);
-    m *= soft(p.y - (chinY - 0.4), 0.05);
+    // the front of a big beard may drape onto the chest; the sides stop at the jaw so it never becomes a collar
+    const floor = chinY - 0.1 - 0.3 * (1 - sstep(0.35, 0.9, A));
+    m *= soft(p.y - floor, 0.05) * soft(2.15 - A - 1.1 * sstep(FACE.mouthY - 0.05, chinY, p.y), 0.15);
     if (m <= 0.001) return null;
     return { m, len: len(p, az) };
   };
@@ -1459,17 +1583,17 @@ const LOGO_HEAD = [
   { id: 'blackcap', name: '🧢 Black Cap (your logo)', build() {
     const g = new THREE.Group(); const blk = std(0x151617, { roughness: 0.9, side: THREE.DoubleSide });
     const K = 1.07, th = eyeTheta - 0.3; g.add(shell(K, th, blk));
-    for (let i = 0; i < 6; i++) { const pts = []; for (let k = 0; k <= 16; k++) pts.push(outerPoint(dirAt(k / 16 * th, i / 6 * TAU + Math.PI / 6)).multiplyScalar(K + 0.005)); g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 24, 0.008, 5), std(0x0a0a0a, { roughness: 1 }))); }
+    for (let i = 0; i < 6; i++) { const pts = []; for (let k = 0; k <= 16; k++) pts.push(outK(outerPoint(dirAt(k / 16 * th, i / 6 * TAU + Math.PI / 6)), K + 0.005)); g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 24, 0.008, 5), std(0x0a0a0a, { roughness: 1 }))); }
     const btn = new THREE.Mesh(new THREE.SphereGeometry(0.05, 14, 10), blk); btn.position.y = TOP * K; btn.scale.y = 0.5; g.add(btn);
     g.add(ring(K + 0.002, th, 0.012, std(0x101010, { roughness: 1 })));
     // bill: built out of the crown's own front edge so it always fits, with real thickness
-    const e = outerPoint(dirAt(th, Math.PI / 2)).multiplyScalar(K);
+    const e = outK(outerPoint(dirAt(th, Math.PI / 2)), K);
     const billMat = std(0x18191a, { roughness: 0.88, side: THREE.DoubleSide }), underMat = std(0x232624, { roughness: 0.95, side: THREE.DoubleSide });
     const span = 1.2, NU = 40, NV = 8, T = 0.028;
     const top = [], bot = [];
     for (let i = 0; i <= NU; i++) {
       const rel = (i / NU) * 2 - 1, phi = Math.PI / 2 + rel * span;
-      const inner = outerPoint(dirAt(th, phi)).multiplyScalar(K * 0.998);
+      const inner = outK(outerPoint(dirAt(th, phi)), K * 0.998);
       const horiz = new THREE.Vector3(inner.x, 0, inner.z).normalize();
       const dir = horiz.clone().lerp(new THREE.Vector3(0, 0, 1), 0.55).normalize();
       const L = 0.6 * Math.pow(Math.cos(rel * Math.PI / 2), 0.55);          // longest in the middle, tapering into the sides
@@ -1509,7 +1633,7 @@ const LOGO_HEAD = [
 ];
 const LOGO_BELT = [
   { id: 'pouchbelt', name: '🥫 Pouch Tin Ammo Belt', build() {
-    const g = new THREE.Group(), y = -0.86;
+    const g = new THREE.Group(), y = BELT_Y;
     const nylon = std(0x1d1e1c, { roughness: 0.95 }), metal = std(0x9a9ea2, { metalness: 0.9, roughness: 0.3 });
     g.add(band(y - 0.09, y + 0.09, 0.05, nylon));
     const buckle = box(0.24, 0.17, 0.04, metal, 0, y, ringPoint(y, 0, 0.08).z, g);
@@ -1564,6 +1688,14 @@ function glbItem(id, name, file, fit, extra) {
         o.frustumCulled = false;
       } });
       const inner = new THREE.Group(); inner.add(model); inner.rotation.set(...(fit.rot || [0, 0, 0])); pivot.add(inner);
+      if (fit.alongX) {   // turn the model so its longest side runs along x and its thinnest side faces the camera (z)
+        const sz = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3()), dims = [sz.x, sz.y, sz.z];
+        const L = dims.indexOf(Math.max(...dims)), T = dims.indexOf(Math.min(...dims.filter((_, i) => i !== L).concat([Infinity]))) ;
+        const ax = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+        const ex = ax[L], ez = ax[T === L ? (L + 2) % 3 : T], ey = new THREE.Vector3().crossVectors(ez, ex);
+        const m = new THREE.Matrix4().makeBasis(ex, ey, ez).invert(); model.quaternion.premultiply(new THREE.Quaternion().setFromRotationMatrix(m));
+        if (fit.flipX) model.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), Math.PI);
+      }
       pivot.updateMatrixWorld(true);
       let box = new THREE.Box3().setFromObject(inner); const size = box.getSize(new THREE.Vector3());
       const k = fit.width ? fit.width / size.x : fit.length ? fit.length / Math.max(size.x, size.z) : fit.height / size.y;
@@ -1573,6 +1705,8 @@ function glbItem(id, name, file, fit, extra) {
       off.y = fit.top !== undefined ? fit.top - box.max.y : fit.bottom !== undefined ? fit.bottom - box.min.y : (fit.centerY ?? 0) - c.y;
       off.z = fit.front !== undefined ? fit.front - box.max.z : fit.back !== undefined ? fit.back - box.min.z : (fit.centerZ ?? 0) - c.z;
       inner.position.add(off);
+      if (fit.rotX) { inner.rotation.x += fit.rotX; }
+      if (fit.conform !== undefined) conformSoft(inner, fit.conform, g);
       ready = true; onReady.forEach(f => f(inner));
     }).catch(e => console.error('Could not load model', file, e));
     const ex = extra ? extra(g, pivot, f => ready ? f() : onReady.push(f)) : null;
@@ -1581,38 +1715,31 @@ function glbItem(id, name, file, fit, extra) {
 }
 const backZ = y => ringPoint(y, Math.PI, 0).z;
 const MODEL_HEAD = [
-  glbItem('m_crewcap', '⭐ Worn Crew Cap (real model)', 'worn_crew_hat.glb', { width: 2 * halfWidthAt(TOP - 0.3) + 0.3, top: TOP + 0.16, back: -0.72 }),
-  glbItem('m_boonie', '⭐ Boonie Hat (real model)', 'bucket_hat.glb', { width: 2.35, top: TOP + 0.1, centerZ: 0.02,
+  glbItem('m_crewcap', '⭐ Worn Crew Cap (real model)', 'worn_crew_hat.glb', { width: 2 * halfWidthAt(TOP - 0.45) + 0.3, top: TOP + 0.13, back: ringPoint(TOP - 0.45, Math.PI, 0).z - 0.08, conform: 0.012 }),
+  glbItem('m_boonie', '⭐ Boonie Hat (real model)', 'bucket_hat.glb', { width: 2.0, yScale: 0.72, top: TOP + 0.16, centerZ: 0.02, conform: 0.012,
     recolor: m => { m.map = multicamTex(); m.map.repeat.set(2, 2); m.color.set(0xffffff); m.roughness = 0.95; } }),
 ];
 const MODEL_EYES = [
   glbItem('m_shades', '⭐ Black Sunglasses (real model)', 'black_sunglasses.glb', { width: 2 * halfWidthAt(FACE.eyeY) + 0.14, centerY: FACE.eyeY + 0.03, front: surfaceAt(0, FACE.eyeY, SMOOTH).p.z + 0.16 }),
 ];
 const MODEL_EARS = [
-  glbItem('m_comtac', '⭐ ComTac Headset (real model)', 'military_balaclava_and_headset_remaster.glb', { keep: o => /headset/i.test((Array.isArray(o.material) ? o.material[0] : o.material).name), width: 2 * halfWidthAt(0.3) + 0.34, yScale: 0.85, top: TOP + 0.09, centerZ: 0.05 }),
-  glbItem('m_headphone', '⭐ Studio Headphones (real model)', 'headphone.glb', { width: 2 * halfWidthAt(0.3) + 0.95, yScale: 0.66, top: TOP + 0.08, centerZ: 0 }),
+  glbItem('m_comtac', '⭐ ComTac Headset (real model)', 'military_balaclava_and_headset_remaster.glb', { keep: o => /headset/i.test((Array.isArray(o.material) ? o.material[0] : o.material).name), width: 2 * halfWidthAt(EAR_Y) + 0.34, yScale: 0.85, top: TOP + 0.09, centerZ: 0.03, conform: 0.01 }),
+  glbItem('m_headphone', '⭐ Studio Headphones (real model)', 'headphone.glb', { width: 2 * halfWidthAt(EAR_Y) + 0.62, yScale: 0.7, top: TOP + 0.08, centerZ: 0, conform: 0.01 }),
 ];
-const flakFit = (pick) => ({ keep: (o, c) => pick(c.x), width: 2 * halfWidthAt(-0.8) + 0.22, yScale: 0.62, top: -0.22, centerZ: 0.02 });
+const flakFit = (pick) => ({ keep: (o, c) => pick(c.x), width: 2 * halfWidthAt(-0.6) - 0.05, yScale: 0.78, top: NECK_Y + 0.04, centerZ: 0.02, conform: 0.02 });
 const MODEL_BODY = [
   glbItem('m_flak_wood', '⭐ Flak Vest Woodland (real model)', 'body_armor_flak_jacket_remaster.glb', flakFit(x => x < -0.3)),
   glbItem('m_flak_desert', '⭐ Flak Vest Desert (real model)', 'body_armor_flak_jacket_remaster.glb', flakFit(x => x >= -0.3 && x <= 0.3)),
   glbItem('m_flak_green', '⭐ Flak Vest Olive (real model)', 'body_armor_flak_jacket_remaster.glb', flakFit(x => x > 0.3)),
 ];
 function slingExtra(side) {
-  return (g, pivot, whenReady) => {
-    const y = -0.55;
-    pivot.position.set(0, y, backZ(y) - 0.04); pivot.rotation.set(0, Math.PI, side * 0.75);
-    const pts = [ringPoint(-0.95, side * 2.4, 0.06), ringPoint(-0.6, side * 1.0, 0.07), ringPoint(-0.25, side * -0.6, 0.06), ringPoint(-0.15, side * -2.0, 0.06), ringPoint(-0.2, Math.PI, 0.08)];
-    g.add(ribbon(pts, 0.06, std(0x2b2a22, { roughness: 0.95 }), 0.012));
-    const sw = spring(30, 3);
-    return { update(st) { pivot.rotation.z = side * 0.75 + sw.step(st.dt, 0, -st.drot.z * 0.05 - st.drot.y * 0.03 + st.kick * 0.3); } };
-  };
+  return (g, pivot, whenReady) => chestSling(g, pivot, side, 1.55, whenReady);
 }
 const AKM_COLORS = { low_part_akm: 0x7a3f1d, high_part_akm: 0x2a2b2d, magazine_akm: 0x5a3018 };
 const MODEL_BACK = [
-  glbItem('m_akm', '⭐ AKM Rifle on Back (real model)', 'akm.glb', { length: 1.7, centerY: 0, centerZ: 0,
+  glbItem('m_akm', '⭐ AKM Rifle Chest Sling (real model)', 'akm.glb', { length: 1.55, centerY: 0, centerZ: 0,
     recolor: (m) => { const c = AKM_COLORS[m.name]; if (c !== undefined) { m.color.set(c); m.roughness = m.name === 'high_part_akm' ? 0.45 : 0.6; m.metalness = m.name === 'high_part_akm' ? 0.7 : 0.05; } } }, slingExtra(1)),
-  glbItem('m_m4', '⭐ M4 Rifle on Back (real model)', 'classic_m4.glb', { rot: [0, Math.PI / 2, 0], length: 1.7, centerY: 0, centerZ: 0 }, slingExtra(-1)),
+  glbItem('m_m4', '⭐ M4 Rifle Chest Sling (real model)', 'classic_m4.glb', { alongX: true, keep: o => !/sling/i.test((Array.isArray(o.material) ? o.material[0] : o.material).name), length: 1.55, centerY: 0, centerZ: 0 }, slingExtra(-1)),
 ];
 
 const NECK_IDS = ['chain', 'bowtie', 'scarf'];
@@ -1630,5 +1757,11 @@ const ITEMS_RAW = [
   ...[...MODEL_BODY, ...BODY.filter(i => !NECK_IDS.includes(i.id)), ...MIL_BODY, ...TK_BODY].map(i => ({ ...i, slot: 'body' })),
   ...[...MODEL_BACK, ...MIL_BACK, ...TK_BACK].map(i => ({ ...i, slot: 'back' })), ...LOGO_BELT.map(i => ({ ...i, slot: 'belt' }))
 ];
-export const ITEMS = ITEMS_RAW.map(it => ({ ...it, build() { const b = it.build(); finishModel(b.obj); return b; } }));
+const SOFT_SLOTS = new Set(['head', 'face', 'eyes', 'ears', 'neck', 'body', 'belt']);
+const NO_CONFORM = new Set(['fishbowl']);
+export const ITEMS = ITEMS_RAW.map(it => ({ ...it, build() {
+  const b = it.build(); finishModel(b.obj);
+  if (SOFT_SLOTS.has(it.slot) && !NO_CONFORM.has(it.id) && !it.id.startsWith('m_')) conformSoft(b.obj, 0.01);
+  return b;
+} }));
 export const DEFAULT_OUTFIT = { hair: 'none', beard: 'none', stache: 'none', head: 'none', face: 'none', eyes: 'none', ears: 'none', neck: 'none', body: 'none', belt: 'none', back: 'none' };
