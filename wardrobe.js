@@ -1460,14 +1460,41 @@ const LOGO_HEAD = [
     const K = 1.07, th = eyeTheta - 0.3; g.add(shell(K, th, blk));
     for (let i = 0; i < 6; i++) { const pts = []; for (let k = 0; k <= 16; k++) pts.push(outerPoint(dirAt(k / 16 * th, i / 6 * TAU + Math.PI / 6)).multiplyScalar(K + 0.005)); g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 24, 0.008, 5), std(0x0a0a0a, { roughness: 1 }))); }
     const btn = new THREE.Mesh(new THREE.SphereGeometry(0.05, 14, 10), blk); btn.position.y = TOP * K; btn.scale.y = 0.5; g.add(btn);
-    g.add(ring(K, th, 0.022, std(0x0e0e0e, { roughness: 1 })));
-    // bill: sticks out over the eyes, bends down at the sides
+    g.add(ring(K + 0.002, th, 0.012, std(0x101010, { roughness: 1 })));
+    // bill: built out of the crown's own front edge so it always fits, with real thickness
     const e = outerPoint(dirAt(th, Math.PI / 2)).multiplyScalar(K);
-    const billGeo = new THREE.CircleGeometry(0.58, 48, 0, Math.PI), bp = billGeo.attributes.position;
-    for (let i = 0; i < bp.count; i++) { const x = bp.getX(i), y = bp.getY(i); bp.setY(i, y * 0.8); bp.setZ(i, 0.16 * (x / 0.58) ** 2); }
-    billGeo.computeVertexNormals();
-    const bill = new THREE.Mesh(billGeo, std(0x1a1b1c, { roughness: 0.85, side: THREE.DoubleSide })); bill.rotation.x = Math.PI / 2 - 0.28; bill.position.set(0, e.y + 0.005, e.z - 0.16); g.add(bill);
-    const billEdge = new THREE.Mesh(new THREE.TorusGeometry(0.58, 0.012, 6, 48, Math.PI), std(0x0e0e0e)); billEdge.rotation.copy(bill.rotation); billEdge.position.copy(bill.position); billEdge.scale.set(1, 0.8, 1); g.add(billEdge);
+    const billMat = std(0x18191a, { roughness: 0.88, side: THREE.DoubleSide }), underMat = std(0x232624, { roughness: 0.95, side: THREE.DoubleSide });
+    const span = 1.2, NU = 40, NV = 8, T = 0.028;
+    const top = [], bot = [];
+    for (let i = 0; i <= NU; i++) {
+      const rel = (i / NU) * 2 - 1, phi = Math.PI / 2 + rel * span;
+      const inner = outerPoint(dirAt(th, phi)).multiplyScalar(K * 0.998);
+      const horiz = new THREE.Vector3(inner.x, 0, inner.z).normalize();
+      const dir = horiz.clone().lerp(new THREE.Vector3(0, 0, 1), 0.55).normalize();
+      const L = 0.6 * Math.pow(Math.cos(rel * Math.PI / 2), 0.55);          // longest in the middle, tapering into the sides
+      const rowT = [], rowB = [];
+      for (let j = 0; j <= NV; j++) {
+        const t = j / NV, q = inner.clone().addScaledVector(dir, L * t);
+        q.y += -0.16 * t * L - 0.1 * rel * rel * t;                          // dips a little forward and curves down at the sides
+        rowT.push(q); rowB.push(q.clone().add(new THREE.Vector3(0, -T, 0)));
+      }
+      top.push(rowT); bot.push(rowB);
+    }
+    const mkSurface = (grid, flip) => {
+      const pos = [], idx = [], uv = [];
+      grid.forEach((row, i) => row.forEach((q, j) => { pos.push(q.x, q.y, q.z); uv.push(i / NU * 4, j / NV); }));
+      for (let i = 0; i < NU; i++) for (let j = 0; j < NV; j++) { const a2 = i * (NV + 1) + j, b2 = a2 + NV + 1; flip ? idx.push(a2, a2 + 1, b2, b2, a2 + 1, b2 + 1) : idx.push(a2, b2, a2 + 1, b2, b2 + 1, a2 + 1); }
+      const gg = new THREE.BufferGeometry(); gg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); gg.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); gg.setIndex(idx); gg.computeVertexNormals(); return gg;
+    };
+    g.add(new THREE.Mesh(mkSurface(top, false), billMat));
+    g.add(new THREE.Mesh(mkSurface(bot, true), underMat));
+    // rounded outer rim joining top and bottom, plus a row of stitching on top
+    const rimPts = top.map(row => row[NV].clone().add(new THREE.Vector3(0, -T / 2, 0)));
+    g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(rimPts), 80, T / 2, 8), billMat));
+    for (let k = 1; k <= 3; k++) {
+      const st = top.map(row => { const q = row[Math.round(NV * (1 - k * 0.12))].clone(); q.y += 0.004; return q; });
+      g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(st), 80, 0.0035, 4), std(0x2c2d2e, { roughness: 1 })));
+    }
     // logo on the front panel, sitting on the crown and bent to its curve
     const fy = e.y + (TOP * K - e.y) * 0.38;
     const s0 = surfaceAt(0, fy / K, SMOOTH), fp = s0.p.multiplyScalar(K), fn = s0.n;
