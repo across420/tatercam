@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { FaceLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 import { buildTater, RealFace, CartoonFace, OneEuro, TOP } from './tater.js';
-import { SLOTS, ITEMS, DEFAULT_OUTFIT, CUSTOM } from './wardrobe.js';
+import { SLOTS, ITEMS, DEFAULT_OUTFIT, CUSTOM, CREDITS } from './wardrobe.js';
 
 // ---------- Saved settings ----------
 const store = {
@@ -96,6 +96,10 @@ function renderWardrobe() {
 }
 wardrobeEl.addEventListener('click', e => { const b = e.target.closest('button.item'); if (b) { equip(b.dataset.slot, b.dataset.id); b.blur(); } });
 for (const s of SLOTS) equip(s.id, outfit[s.id]);
+
+// ---------- Model credits (CC BY 4.0) ----------
+const creditsEl = document.getElementById('credits');
+if (creditsEl) creditsEl.innerHTML = CREDITS.map(([t, by, url]) => `<div>"${t}" by ${by} — <a href="${url}" target="_blank" rel="noopener">Fab</a>, CC BY 4.0</div>`).join('');
 
 // ---------- Your logos (cap + pouch tins) ----------
 function loadLogo(kind, src) {

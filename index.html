@@ -56,6 +56,9 @@
   .logos { border-top: 1px solid #333; margin-top: 6px; padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
   .logoRow { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: #ccc; font-size: 12px; }
   .logoRow input { max-width: 160px; font-size: 11px; color: #ccc; }
+  .creditsBox { margin-top: 6px; color: #999; font-size: 11px; line-height: 1.5; }
+  .creditsBox summary { cursor: pointer; color: #bbb; }
+  .creditsBox a { color: #f0b84a; }
   .hidden { display: none !important; }
 </style>
 <script type="importmap">
@@ -99,6 +102,7 @@
     <label class="logoRow">Tin lid <input type="file" id="logo-can" accept="image/*"></label>
     <button id="logo-clear" class="item">Use built-in designs</button>
   </div>
+  <details class="creditsBox"><summary>Model credits</summary><div id="credits"></div></details>
 </div>
 <div id="touch">
   <button data-key="h" class="main">☰ Panels</button>

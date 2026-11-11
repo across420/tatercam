@@ -3,6 +3,7 @@
 // st = { t, dt, jaw, smile, rot, drot:{x,y,z}, kick, visorDown, nvgDown }
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FACE, TOP, outerPoint, shapeNormal, surfaceAt, ringPoint, halfWidthAt, smooth, vnoise } from './tater.js';
 
 const TAU = Math.PI * 2, Z = new THREE.Vector3(0, 0, 1);
@@ -1529,6 +1530,91 @@ const LOGO_BELT = [
     return { obj: g, update(st) { for (const t of tins) t.tin.rotation.x = t.s.step(st.dt, 0, -st.drot.x * 0.02 + st.kick * (0.2 + 0.05 * (t.i % 3))); } };
   } },
 ];
+
+// ======================= DOWNLOADED MODELS (Fab, CC BY 4.0) =======================
+// Real artist-made models, shrunk for live use and fitted onto the potato here.
+export const CREDITS = [
+  ['AKM Assault Rifle 3D model realistic', 'Ag72', 'https://www.fab.com/listings/54921e31-5077-4ad8-9d5a-7b8bdd6ac7d3'],
+  ['Classic M4', 'SpatialNeglect', 'https://www.fab.com/listings/0fb6a75a-75aa-4ffd-b9e4-6f292f7a410a'],
+  ['Bucket Hat', 'Tiko', 'https://www.fab.com/listings/50a8d899-e55d-430d-b6ac-47d681cbd34d'],
+  ['Worn Crew Hat', 'Kami Rapacz', 'https://www.fab.com/listings/05e5fa4f-6af7-44c3-bbab-12b9b257e8f0'],
+  ['Headphone', 'Gabriel Quintana', 'https://www.fab.com/listings/c1962a4b-0aae-4a6b-a724-f7e969d3fd72'],
+  ['Black Sunglasses', 'DeepDown', 'https://www.fab.com/listings/38836718-e679-4e2e-974f-0005221616cd'],
+  ['body armor flak jacket (remaster)', 'marko1937', 'https://www.fab.com/listings/7f8dfc3f-4915-462b-90d6-d28d75eed5a1'],
+  ['military balaclava and headset (remaster)', 'marko1937', 'https://www.fab.com/listings/cf2ad803-12ff-4be0-937e-8602ad105d21'],
+];
+const GLB_CACHE = {};
+const gltfLoader = new GLTFLoader();
+function loadGLB(file) {
+  if (!GLB_CACHE[file]) GLB_CACHE[file] = gltfLoader.loadAsync(new URL('./assets/gear/' + file, import.meta.url).href).then(g => g.scene);
+  return GLB_CACHE[file];
+}
+function meshCenter(o) { const b = new THREE.Box3().setFromObject(o); return b.getCenter(new THREE.Vector3()); }
+// fit: { keep(mesh), rot:[x,y,z], width|length|height, yScale, top|centerY|bottom, front|back|centerZ, x, recolor(mat, mesh) }
+function glbItem(id, name, file, fit, extra) {
+  return { id, name, build() {
+    const g = new THREE.Group(), pivot = new THREE.Group(); g.add(pivot);
+    let ready = false, onReady = [];
+    loadGLB(file).then(src => {
+      const model = src.clone(true); model.updateMatrixWorld(true);
+      if (fit.keep) { const drop = []; model.traverse(o => { if (o.isMesh && !fit.keep(o, meshCenter(o))) drop.push(o); }); drop.forEach(o => o.parent.remove(o)); }
+      model.traverse(o => { if (o.isMesh) {
+        o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
+        if (fit.recolor) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => fit.recolor(m, o));
+        o.frustumCulled = false;
+      } });
+      const inner = new THREE.Group(); inner.add(model); inner.rotation.set(...(fit.rot || [0, 0, 0])); pivot.add(inner);
+      pivot.updateMatrixWorld(true);
+      let box = new THREE.Box3().setFromObject(inner); const size = box.getSize(new THREE.Vector3());
+      const k = fit.width ? fit.width / size.x : fit.length ? fit.length / Math.max(size.x, size.z) : fit.height / size.y;
+      inner.scale.multiply(new THREE.Vector3(k, k * (fit.yScale || 1), k));
+      pivot.updateMatrixWorld(true); box = new THREE.Box3().setFromObject(inner);
+      const c = box.getCenter(new THREE.Vector3()), off = new THREE.Vector3((fit.x ?? 0) - c.x, 0, 0);
+      off.y = fit.top !== undefined ? fit.top - box.max.y : fit.bottom !== undefined ? fit.bottom - box.min.y : (fit.centerY ?? 0) - c.y;
+      off.z = fit.front !== undefined ? fit.front - box.max.z : fit.back !== undefined ? fit.back - box.min.z : (fit.centerZ ?? 0) - c.z;
+      inner.position.add(off);
+      ready = true; onReady.forEach(f => f(inner));
+    }).catch(e => console.error('Could not load model', file, e));
+    const ex = extra ? extra(g, pivot, f => ready ? f() : onReady.push(f)) : null;
+    return { obj: g, update: ex && ex.update ? ex.update : () => {} };
+  } };
+}
+const backZ = y => ringPoint(y, Math.PI, 0).z;
+const MODEL_HEAD = [
+  glbItem('m_crewcap', '⭐ Worn Crew Cap (real model)', 'worn_crew_hat.glb', { width: 2 * halfWidthAt(TOP - 0.3) + 0.3, top: TOP + 0.16, back: -0.72 }),
+  glbItem('m_boonie', '⭐ Boonie Hat (real model)', 'bucket_hat.glb', { width: 2.35, top: TOP + 0.1, centerZ: 0.02,
+    recolor: m => { m.map = multicamTex(); m.map.repeat.set(2, 2); m.color.set(0xffffff); m.roughness = 0.95; } }),
+];
+const MODEL_EYES = [
+  glbItem('m_shades', '⭐ Black Sunglasses (real model)', 'black_sunglasses.glb', { width: 2 * halfWidthAt(FACE.eyeY) + 0.14, centerY: FACE.eyeY + 0.03, front: surfaceAt(0, FACE.eyeY, SMOOTH).p.z + 0.16 }),
+];
+const MODEL_EARS = [
+  glbItem('m_comtac', '⭐ ComTac Headset (real model)', 'military_balaclava_and_headset_remaster.glb', { keep: o => /headset/i.test((Array.isArray(o.material) ? o.material[0] : o.material).name), width: 2 * halfWidthAt(0.3) + 0.34, yScale: 0.85, top: TOP + 0.09, centerZ: 0.05 }),
+  glbItem('m_headphone', '⭐ Studio Headphones (real model)', 'headphone.glb', { width: 2 * halfWidthAt(0.3) + 0.95, yScale: 0.66, top: TOP + 0.08, centerZ: 0 }),
+];
+const flakFit = (pick) => ({ keep: (o, c) => pick(c.x), width: 2 * halfWidthAt(-0.8) + 0.22, yScale: 0.62, top: -0.22, centerZ: 0.02 });
+const MODEL_BODY = [
+  glbItem('m_flak_wood', '⭐ Flak Vest Woodland (real model)', 'body_armor_flak_jacket_remaster.glb', flakFit(x => x < -0.3)),
+  glbItem('m_flak_desert', '⭐ Flak Vest Desert (real model)', 'body_armor_flak_jacket_remaster.glb', flakFit(x => x >= -0.3 && x <= 0.3)),
+  glbItem('m_flak_green', '⭐ Flak Vest Olive (real model)', 'body_armor_flak_jacket_remaster.glb', flakFit(x => x > 0.3)),
+];
+function slingExtra(side) {
+  return (g, pivot, whenReady) => {
+    const y = -0.55;
+    pivot.position.set(0, y, backZ(y) - 0.04); pivot.rotation.set(0, Math.PI, side * 0.75);
+    const pts = [ringPoint(-0.95, side * 2.4, 0.06), ringPoint(-0.6, side * 1.0, 0.07), ringPoint(-0.25, side * -0.6, 0.06), ringPoint(-0.15, side * -2.0, 0.06), ringPoint(-0.2, Math.PI, 0.08)];
+    g.add(ribbon(pts, 0.06, std(0x2b2a22, { roughness: 0.95 }), 0.012));
+    const sw = spring(30, 3);
+    return { update(st) { pivot.rotation.z = side * 0.75 + sw.step(st.dt, 0, -st.drot.z * 0.05 - st.drot.y * 0.03 + st.kick * 0.3); } };
+  };
+}
+const AKM_COLORS = { low_part_akm: 0x7a3f1d, high_part_akm: 0x2a2b2d, magazine_akm: 0x5a3018 };
+const MODEL_BACK = [
+  glbItem('m_akm', '⭐ AKM Rifle on Back (real model)', 'akm.glb', { length: 1.7, centerY: 0, centerZ: 0,
+    recolor: (m) => { const c = AKM_COLORS[m.name]; if (c !== undefined) { m.color.set(c); m.roughness = m.name === 'high_part_akm' ? 0.45 : 0.6; m.metalness = m.name === 'high_part_akm' ? 0.7 : 0.05; } } }, slingExtra(1)),
+  glbItem('m_m4', '⭐ M4 Rifle on Back (real model)', 'classic_m4.glb', { rot: [0, Math.PI / 2, 0], length: 1.7, centerY: 0, centerZ: 0 }, slingExtra(-1)),
+];
+
 const NECK_IDS = ['chain', 'bowtie', 'scarf'];
 export const SLOTS = [
   { id: 'hair', name: 'Hair', anchor: 'head' }, { id: 'head', name: 'Head', anchor: 'head' }, { id: 'beard', name: 'Beard', anchor: 'head' },
@@ -1538,11 +1624,11 @@ export const SLOTS = [
 ];
 const ITEMS_RAW = [
   ...HAIRDOS2.map(i => ({ ...i, slot: 'hair' })), ...BEARDS2.map(i => ({ ...i, slot: 'beard' })), ...STACHES2.map(i => ({ ...i, slot: 'stache' })),
-  ...[...MIL_HEAD, ...TK_HEAD, ...LOGO_HEAD, ...HEAD].map(i => ({ ...i, slot: 'head' })), ...[...MIL_FACE, ...TK_FACE].map(i => ({ ...i, slot: 'face' })),
-  ...[...EYES, ...MIL_EYES, ...TK_EYES].map(i => ({ ...i, slot: 'eyes' })), ...[...EARS, ...TK_EARS].map(i => ({ ...i, slot: 'ears' })),
+  ...[...MODEL_HEAD, ...MIL_HEAD, ...TK_HEAD, ...LOGO_HEAD, ...HEAD].map(i => ({ ...i, slot: 'head' })), ...[...MIL_FACE, ...TK_FACE].map(i => ({ ...i, slot: 'face' })),
+  ...[...MODEL_EYES, ...EYES, ...MIL_EYES, ...TK_EYES].map(i => ({ ...i, slot: 'eyes' })), ...[...MODEL_EARS, ...EARS, ...TK_EARS].map(i => ({ ...i, slot: 'ears' })),
   ...[...BODY.filter(i => NECK_IDS.includes(i.id)), ...MIL_NECK, ...TK_NECK].map(i => ({ ...i, slot: 'neck' })),
-  ...[...BODY.filter(i => !NECK_IDS.includes(i.id)), ...MIL_BODY, ...TK_BODY].map(i => ({ ...i, slot: 'body' })),
-  ...[...MIL_BACK, ...TK_BACK].map(i => ({ ...i, slot: 'back' })), ...LOGO_BELT.map(i => ({ ...i, slot: 'belt' }))
+  ...[...MODEL_BODY, ...BODY.filter(i => !NECK_IDS.includes(i.id)), ...MIL_BODY, ...TK_BODY].map(i => ({ ...i, slot: 'body' })),
+  ...[...MODEL_BACK, ...MIL_BACK, ...TK_BACK].map(i => ({ ...i, slot: 'back' })), ...LOGO_BELT.map(i => ({ ...i, slot: 'belt' }))
 ];
 export const ITEMS = ITEMS_RAW.map(it => ({ ...it, build() { const b = it.build(); finishModel(b.obj); return b; } }));
 export const DEFAULT_OUTFIT = { hair: 'none', beard: 'none', stache: 'none', head: 'none', face: 'none', eyes: 'none', ears: 'none', neck: 'none', body: 'none', belt: 'none', back: 'none' };
