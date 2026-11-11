@@ -204,7 +204,7 @@ const alphaFromHC = d => { outerPoint(d, _hp).sub(HC); return Math.acos(Math.max
 let ALPHA_EYE = null;
 function headAlpha(th) {
   if (ALPHA_EYE === null) { const e = surfaceAt(0, FACE.eyeY, SMOOTH).p.sub(HC); ALPHA_EYE = Math.acos(e.y / e.length()); }
-  return th <= eyeTheta ? ALPHA_EYE * Math.pow(Math.max(0, th) / eyeTheta, 0.6) : ALPHA_EYE + (th - eyeTheta);
+  return th <= eyeTheta ? ALPHA_EYE * (1 - Math.pow(1 - Math.max(0, th) / eyeTheta, 2)) : ALPHA_EYE + (th - eyeTheta);
 }
 const DIR_CACHE = new Map();
 function dirAt(theta, phi) {
@@ -352,25 +352,9 @@ const HEAD = [
     return { obj: g, update(st) { prop.rotation.y += st.dt * (4 + st.jaw * 30 + st.smile * 12); } };
   } },
 
-  { id: 'cowboy', name: '🤠 Cowboy Hat', build() {
-    const y = TOP - 0.42, s = (halfWidthAt(y) + 0.07) / 0.66;
-    const g = new THREE.Group(); g.position.y = y; g.rotation.x = -0.08; g.scale.set(s, s, s * 0.9);
-    const leather = std(0x7a4b28, { roughness: 0.85, side: THREE.DoubleSide });
-    const crown = new THREE.Mesh(new THREE.LatheGeometry([[0.001, 0.6], [0.35, 0.58], [0.52, 0.52], [0.6, 0.4], [0.63, 0.15], [0.66, 0]].map(([x, yy]) => new THREE.Vector2(x, yy)), 64), leather);
-    const cp = crown.geometry.attributes.position;
-    for (let i = 0; i < cp.count; i++) { const yy = cp.getY(i); if (yy > 0.45) cp.setY(i, yy - 0.09 * Math.max(0, 1 - Math.abs(cp.getX(i)) / 0.3)); }
-    crown.geometry.computeVertexNormals(); g.add(crown);
-    const brimGeo = new THREE.RingGeometry(0.6, 1.38, 80, 2); brimGeo.rotateX(-Math.PI / 2);
-    const bp = brimGeo.attributes.position;
-    for (let i = 0; i < bp.count; i++) { const x = bp.getX(i), z = bp.getZ(i); bp.setY(i, 0.55 * Math.max(0, Math.abs(x) - 0.6) ** 2 - 0.05 * Math.max(0, z) ** 2); }
-    brimGeo.computeVertexNormals(); g.add(new THREE.Mesh(brimGeo, leather));
-    const b = new THREE.Mesh(new THREE.CylinderGeometry(0.635, 0.66, 0.1, 64, 1, true), std(0x2b1a10)); b.position.y = 0.07; g.add(b);
-    return { obj: g, update() {} };
-  } },
-
   { id: 'crown', name: '👑 Crown', build() {
-    const y = TOP - 0.28, r = halfWidthAt(y) + 0.03;
-    const g = new THREE.Group(); g.position.y = y; g.rotation.z = 0.14; g.scale.z = 0.85;
+    const y = TOP - 0.42, r = halfWidthAt(y) + 0.03;
+    const g = new THREE.Group(); g.position.y = y; g.rotation.z = 0.1; g.scale.z = 0.85;
     const au = gold(); g.add(new THREE.Mesh(new THREE.CylinderGeometry(r * 1.06, r, 0.22, 64, 1, true), au));
     const gems = [0xd81b60, 0x1e88e5, 0x43a047];
     for (let i = 0; i < 8; i++) {
@@ -384,7 +368,7 @@ const HEAD = [
 
   { id: 'chef', name: '👨‍🍳 Chef Hat', build() {
     const g = new THREE.Group(); const white = std(0xfafafa, { roughness: 0.95, side: THREE.DoubleSide });
-    const y = TOP - 0.3, r = halfWidthAt(y) + 0.04;
+    const y = TOP - 0.4, r = halfWidthAt(y) + 0.04;
     const b = new THREE.Mesh(new THREE.CylinderGeometry(r * 1.04, r, 0.32, 64, 1, true), white); b.position.y = y; b.scale.z = 0.85; g.add(b);
     const puff = new THREE.Group(); puff.position.y = y + 0.38; g.add(puff);
     for (let i = 0; i < 6; i++) { const a = i / 6 * TAU; const s = new THREE.Mesh(new THREE.SphereGeometry(0.28, 20, 14), white); s.position.set(Math.sin(a) * 0.3, 0, Math.cos(a) * 0.26); puff.add(s); }
@@ -393,27 +377,8 @@ const HEAD = [
     return { obj: g, update(st) { const x = j.step(st.dt, 0, (st.jaw - pj) * 4 + st.kick * 0.5); pj = st.jaw; puff.scale.set(1 - x * 0.2, 1 + x * 0.4, 1 - x * 0.2); } };
   } },
 
-  { id: 'viking', name: '⚔️ Viking Helmet', build() {
-    const g = new THREE.Group(); const th = eyeTheta - 0.35;
-    const steel = std(0x8c8f94, { metalness: 0.85, roughness: 0.38, side: THREE.DoubleSide }), bronze = std(0xb07a3a, { metalness: 0.9, roughness: 0.3 });
-    g.add(shell(1.09, th, steel)); g.add(ring(1.09, th, 0.05, bronze));
-    const ridgePts = []; for (let i = 0; i <= 40; i++) ridgePts.push(outK(outerPoint(dirAt(th * (i / 20 - 1), Math.PI / 2)), 1.1));
-    g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(ridgePts), 60, 0.04, 8), bronze));
-    const ivory = std(0xefe6cf, { roughness: 0.5 });
-    for (const sx of [-1, 1]) {
-      const p0 = ringPoint(FACE.eyeY + 0.3, sx * Math.PI / 2, 0.05);
-      const c = new THREE.QuadraticBezierCurve3(p0, p0.clone().add(new THREE.Vector3(sx * 0.6, 0.15, 0.1)), p0.clone().add(new THREE.Vector3(sx * 0.65, 0.85, 0.25)));
-      for (let i = 0, N = 10; i < N; i++) {
-        const a = c.getPoint(i / N), b = c.getPoint((i + 1) / N), r0 = 0.16 * (1 - i / N) + 0.02, r1 = 0.16 * (1 - (i + 1) / N) + 0.015;
-        const seg = new THREE.Mesh(new THREE.CylinderGeometry(r1, r0, a.distanceTo(b) * 1.05, 16), ivory);
-        seg.position.copy(a).add(b).multiplyScalar(0.5); seg.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize()); g.add(seg);
-      }
-    }
-    return { obj: g, update() {} };
-  } },
-
   { id: 'party', name: '🎉 Party Hat', build() {
-    const g = new THREE.Group(); g.position.set(0.12, TOP + 0.3, 0); g.rotation.z = -0.28;
+    const g = new THREE.Group(); g.position.set(0.1, TOP + 0.2, 0); g.rotation.z = -0.25;
     g.add(new THREE.Mesh(new THREE.ConeGeometry(0.33, 0.8, 48, 1, true), new THREE.MeshStandardMaterial({ map: stripeTex(['#ff4fa3', '#ffd400', '#2ec4ff']), roughness: 0.6, side: THREE.DoubleSide })));
     const pom = new THREE.Mesh(new THREE.SphereGeometry(0.085, 16, 12), std(0xffd400, { roughness: 1 })); pom.position.y = 0.43; g.add(pom);
     const w = spring(100, 5);
@@ -762,7 +727,7 @@ const MIL_BODY = [
   } },
   { id: 'bandolier', name: '🧨 Shotgun Shell Bandolier', build() {
     const g = new THREE.Group(); const leather = std(0x5a3a20, { roughness: 0.8 });
-    const path = a => ringPoint(by(-0.75) + 0.45 * Math.sin(a + 0.6), a, 0.07);
+    const path = a => ringPoint(-0.45 + 0.7 * Math.sin(a + 0.6), a, 0.07);
     const pts = []; for (let i = 0; i < 64; i++) pts.push(path(i / 64 * TAU));
     g.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true), 160, 0.05, 8, true), leather));
     const red = std(0xa11b1b, { roughness: 0.5 }), brass = std(0xd8b04a, { metalness: 1, roughness: 0.3 });
@@ -1076,7 +1041,7 @@ function chestSling(g, pivot, side, len, whenReady) {
 }
 function slungGun(make, side = 1) {
   const g = new THREE.Group(), pivot = new THREE.Group(); g.add(pivot);
-  const gun = make(); gun.scale.setScalar(1.3); pivot.add(gun);
+  const gun = make(); gun.scale.setScalar(1.45); pivot.add(gun);
   const b = new THREE.Box3().setFromObject(gun), c = b.getCenter(new THREE.Vector3()); gun.position.sub(c);
   const ex = chestSling(g, pivot, side, b.getSize(new THREE.Vector3()).x);
   return { obj: g, update: ex.update };
@@ -1666,21 +1631,58 @@ export const CREDITS = [
   ['Black Sunglasses', 'DeepDown', 'https://www.fab.com/listings/38836718-e679-4e2e-974f-0005221616cd'],
   ['body armor flak jacket (remaster)', 'marko1937', 'https://www.fab.com/listings/7f8dfc3f-4915-462b-90d6-d28d75eed5a1'],
   ['military balaclava and headset (remaster)', 'marko1937', 'https://www.fab.com/listings/cf2ad803-12ff-4be0-937e-8602ad105d21'],
+  ['!!BETTER!! Beanie', 'Viktor™', 'https://www.fab.com/listings/6d6a2599-028d-4ae7-9613-32b804b0393e'],
+  ['Balaclava Ski Mask', 'LeandroN', 'https://www.fab.com/listings/0bdbdabc-5fa8-4de1-b1f6-c71ceff39934'],
+  ['Miners helmet with carbide lamp', 'Shannen Art', 'https://www.fab.com/listings/6c3ee79e-bda9-420b-b46c-b4475c959941'],
+  ['Viking Helmet', 'Chathurya Francisco', 'https://www.fab.com/listings/8dc1d83c-7e11-49e8-9e68-facd8b323fce'],
+  ['Classic Pilot Helmet', 'Chung the Artist', 'https://www.fab.com/listings/2394a873-b429-4658-bc6e-f3839d3c50f8'],
+  ['Realistic Fedora Hat', 'dimension Dazzle', 'https://www.fab.com/listings/685ec0d0-30ea-4397-960a-155de431a63e'],
+  ['Low Poly Cartoon Cowboy Hat Free', 'chroma3d', 'https://www.fab.com/listings/217970b2-7e39-47a2-92d4-a63586b26db5'],
+  ['Welding Mask (low poly!)', 'Strifey7', 'https://www.fab.com/listings/0944cdb0-1e96-49b4-84a1-0f13cb6d65a9'],
+  ['Individual First Aid Kit (IFAK, Black color)', "Barnus Model's", 'https://www.fab.com/listings/6870c563-f3c8-4f19-805b-f4ba9b536559'],
+  ['Grenade F1', 'CATholic', 'https://www.fab.com/listings/ca33a806-adfd-4270-b3c7-81bbfc96d2fe'],
+  ['Tactical Knife', 'Gerardo Justel', 'https://www.fab.com/listings/33452f11-fc65-479e-8d6e-75bf8be1c0ff'],
+  ['Tactical Flashlight', 'crow', 'https://www.fab.com/listings/e458eeda-2893-45b9-a946-a031ea395d96'],
+  ['PM Makarov Pistol 3D Model', 'Serhii Shamrai', 'https://www.fab.com/listings/40911892-5b58-47e8-a616-09b6ea19c556'],
+  ['Emergency Radio', 'Gerardo Justel', 'https://www.fab.com/listings/15d244fc-dbe2-4829-861d-7e64ca89b094'],
+  ['Free MP5', 'fakeblenderman', 'https://www.fab.com/listings/53bedd4b-95d2-433f-9f30-987c45513763'],
+  ['Double Barrel Shotgun', 'Ryan Nein', 'https://www.fab.com/listings/cb46c575-7c6a-460e-82ef-8ef532df50c3'],
+  ['Sawed off Shotgun', 'V-Enterprises', 'https://www.fab.com/listings/406e003f-1a3b-4c9f-9588-6f16baf079d5'],
+  ['Stylized Backpack', 'dimension Dazzle', 'https://www.fab.com/listings/2faf208a-1270-4218-b306-ccc700d9fed1'],
 ];
+// loose hats lift and settle a little when you hop/nod, pivoting on the crown
+function hatBounce(amt = 1) {
+  return (g, pivot) => {
+    const sx = spring(55, 5), sz = spring(55, 5);
+    return { update(st) {
+      const kx = sx.step(st.dt, 0, -st.drot.x * 0.006 * amt + st.kick * 0.03 * amt), kz = sz.step(st.dt, 0, -st.drot.z * 0.006 * amt - st.drot.y * 0.003 * amt);
+      pivot.rotation.x = kx * 0.5; pivot.rotation.z = kz * 0.5; pivot.position.y = Math.abs(kx) * 0.15;
+    } };
+  };
+}
 const GLB_CACHE = {};
 const gltfLoader = new GLTFLoader();
 function loadGLB(file) {
   if (!GLB_CACHE[file]) GLB_CACHE[file] = gltfLoader.loadAsync(new URL('./assets/gear/' + file, import.meta.url).href).then(g => g.scene);
   return GLB_CACHE[file];
 }
+// bounding box of obj measured in frame's local coordinates (independent of where the avatar is / how it's turned)
+function boxIn(obj, frame) {
+  frame.updateMatrixWorld(true); obj.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(frame.matrixWorld).invert(), box = new THREE.Box3(), m = new THREE.Matrix4(), b = new THREE.Box3();
+  obj.traverse(o => { if (!o.isMesh) return; if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    m.multiplyMatrices(inv, o.matrixWorld); b.copy(o.geometry.boundingBox).applyMatrix4(m); box.union(b); });
+  return box;
+}
 function meshCenter(o) { const b = new THREE.Box3().setFromObject(o); return b.getCenter(new THREE.Vector3()); }
 // fit: { keep(mesh), rot:[x,y,z], width|length|height, yScale, top|centerY|bottom, front|back|centerZ, x, recolor(mat, mesh) }
 function glbItem(id, name, file, fit, extra) {
   return { id, name, build() {
     const g = new THREE.Group(), pivot = new THREE.Group(); g.add(pivot);
-    let ready = false, onReady = [];
+    let ready = false, onReady = [], innerRef = null;
     loadGLB(file).then(src => {
       const model = src.clone(true); model.updateMatrixWorld(true);
+      if (fit.firstOnly) { let seen = false; const drop = []; model.traverse(o => { if (o.isMesh) { if (seen) drop.push(o); seen = true; } }); drop.forEach(o => o.parent.remove(o)); }
       if (fit.keep) { const drop = []; model.traverse(o => { if (o.isMesh && !fit.keep(o, meshCenter(o))) drop.push(o); }); drop.forEach(o => o.parent.remove(o)); }
       model.traverse(o => { if (o.isMesh) {
         o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone();
@@ -1689,7 +1691,7 @@ function glbItem(id, name, file, fit, extra) {
       } });
       const inner = new THREE.Group(); inner.add(model); inner.rotation.set(...(fit.rot || [0, 0, 0])); pivot.add(inner);
       if (fit.alongX) {   // turn the model so its longest side runs along x and its thinnest side faces the camera (z)
-        const sz = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3()), dims = [sz.x, sz.y, sz.z];
+        const sz = boxIn(model, inner).getSize(new THREE.Vector3()), dims = [sz.x, sz.y, sz.z];
         const L = dims.indexOf(Math.max(...dims)), T = dims.indexOf(Math.min(...dims.filter((_, i) => i !== L).concat([Infinity]))) ;
         const ax = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
         const ex = ax[L], ez = ax[T === L ? (L + 2) % 3 : T], ey = new THREE.Vector3().crossVectors(ez, ex);
@@ -1697,19 +1699,19 @@ function glbItem(id, name, file, fit, extra) {
         if (fit.flipX) model.rotateOnWorldAxis(new THREE.Vector3(0, 1, 0), Math.PI);
       }
       pivot.updateMatrixWorld(true);
-      let box = new THREE.Box3().setFromObject(inner); const size = box.getSize(new THREE.Vector3());
+      let box = boxIn(inner, pivot); const size = box.getSize(new THREE.Vector3());
       const k = fit.width ? fit.width / size.x : fit.length ? fit.length / Math.max(size.x, size.z) : fit.height / size.y;
       inner.scale.multiply(new THREE.Vector3(k, k * (fit.yScale || 1), k));
-      pivot.updateMatrixWorld(true); box = new THREE.Box3().setFromObject(inner);
+      box = boxIn(inner, pivot);
       const c = box.getCenter(new THREE.Vector3()), off = new THREE.Vector3((fit.x ?? 0) - c.x, 0, 0);
       off.y = fit.top !== undefined ? fit.top - box.max.y : fit.bottom !== undefined ? fit.bottom - box.min.y : (fit.centerY ?? 0) - c.y;
       off.z = fit.front !== undefined ? fit.front - box.max.z : fit.back !== undefined ? fit.back - box.min.z : (fit.centerZ ?? 0) - c.z;
       inner.position.add(off);
       if (fit.rotX) { inner.rotation.x += fit.rotX; }
       if (fit.conform !== undefined) conformSoft(inner, fit.conform, g);
-      ready = true; onReady.forEach(f => f(inner));
+      ready = true; innerRef = inner; onReady.forEach(f => f(inner));
     }).catch(e => console.error('Could not load model', file, e));
-    const ex = extra ? extra(g, pivot, f => ready ? f() : onReady.push(f)) : null;
+    const ex = extra ? extra(g, pivot, f => ready ? f(innerRef) : onReady.push(f)) : null;
     return { obj: g, update: ex && ex.update ? ex.update : () => {} };
   } };
 }
@@ -1717,14 +1719,14 @@ const backZ = y => ringPoint(y, Math.PI, 0).z;
 const MODEL_HEAD = [
   glbItem('m_crewcap', '⭐ Worn Crew Cap (real model)', 'worn_crew_hat.glb', { width: 2 * halfWidthAt(TOP - 0.45) + 0.3, top: TOP + 0.13, back: ringPoint(TOP - 0.45, Math.PI, 0).z - 0.08, conform: 0.012 }),
   glbItem('m_boonie', '⭐ Boonie Hat (real model)', 'bucket_hat.glb', { width: 2.0, yScale: 0.72, top: TOP + 0.16, centerZ: 0.02, conform: 0.012,
-    recolor: m => { m.map = multicamTex(); m.map.repeat.set(2, 2); m.color.set(0xffffff); m.roughness = 0.95; } }),
+    recolor: m => { m.map = multicamTex(); m.map.repeat.set(2, 2); m.color.set(0xffffff); m.roughness = 0.95; } }, hatBounce(1.2)),
 ];
 const MODEL_EYES = [
   glbItem('m_shades', '⭐ Black Sunglasses (real model)', 'black_sunglasses.glb', { width: 2 * halfWidthAt(FACE.eyeY) + 0.14, centerY: FACE.eyeY + 0.03, front: surfaceAt(0, FACE.eyeY, SMOOTH).p.z + 0.16 }),
 ];
 const MODEL_EARS = [
-  glbItem('m_comtac', '⭐ ComTac Headset (real model)', 'military_balaclava_and_headset_remaster.glb', { keep: o => /headset/i.test((Array.isArray(o.material) ? o.material[0] : o.material).name), width: 2 * halfWidthAt(EAR_Y) + 0.34, yScale: 0.85, top: TOP + 0.09, centerZ: 0.03, conform: 0.01 }),
-  glbItem('m_headphone', '⭐ Studio Headphones (real model)', 'headphone.glb', { width: 2 * halfWidthAt(EAR_Y) + 0.62, yScale: 0.7, top: TOP + 0.08, centerZ: 0, conform: 0.01 }),
+  glbItem('m_comtac', '⭐ ComTac Headset (real model)', 'military_balaclava_and_headset_remaster.glb', { keep: o => /headset/i.test((Array.isArray(o.material) ? o.material[0] : o.material).name), width: 2 * halfWidthAt(EAR_Y) + 0.34, yScale: 0.85, top: TOP + 0.09, centerZ: 0.26, conform: 0.01 }),
+  glbItem('m_headphone', '⭐ Studio Headphones (real model)', 'headphone.glb', { width: 2 * halfWidthAt(EAR_Y) + 0.42, yScale: 0.56, top: TOP + 0.06, centerZ: 0.1, conform: 0.01 }),
 ];
 const flakFit = (pick) => ({ keep: (o, c) => pick(c.x), width: 2 * halfWidthAt(-0.6) - 0.05, yScale: 0.78, top: NECK_Y + 0.04, centerZ: 0.02, conform: 0.02 });
 const MODEL_BODY = [
@@ -1733,13 +1735,130 @@ const MODEL_BODY = [
   glbItem('m_flak_green', '⭐ Flak Vest Olive (real model)', 'body_armor_flak_jacket_remaster.glb', flakFit(x => x > 0.3)),
 ];
 function slingExtra(side) {
-  return (g, pivot, whenReady) => chestSling(g, pivot, side, 1.55, whenReady);
+  return (g, pivot, whenReady) => chestSling(g, pivot, side, 1.8, whenReady);
 }
 const AKM_COLORS = { low_part_akm: 0x7a3f1d, high_part_akm: 0x2a2b2d, magazine_akm: 0x5a3018 };
 const MODEL_BACK = [
-  glbItem('m_akm', '⭐ AKM Rifle Chest Sling (real model)', 'akm.glb', { length: 1.55, centerY: 0, centerZ: 0,
+  glbItem('m_akm', '⭐ AKM Rifle Chest Sling (real model)', 'akm.glb', { length: 1.8, centerY: 0, centerZ: 0,
     recolor: (m) => { const c = AKM_COLORS[m.name]; if (c !== undefined) { m.color.set(c); m.roughness = m.name === 'high_part_akm' ? 0.45 : 0.6; m.metalness = m.name === 'high_part_akm' ? 0.7 : 0.05; } } }, slingExtra(1)),
-  glbItem('m_m4', '⭐ M4 Rifle Chest Sling (real model)', 'classic_m4.glb', { alongX: true, keep: o => !/sling/i.test((Array.isArray(o.material) ? o.material[0] : o.material).name), length: 1.55, centerY: 0, centerZ: 0 }, slingExtra(-1)),
+  glbItem('m_m4', '⭐ M4 Rifle Chest Sling (real model)', 'classic_m4.glb', { alongX: true, keep: o => !/sling/i.test((Array.isArray(o.material) ? o.material[0] : o.material).name), length: 1.8, centerY: 0, centerZ: 0 }, slingExtra(-1)),
+];
+
+// ---------- more downloaded models ----------
+const hw = y => halfWidthAt(y);
+const MODEL_HEAD2 = [
+  glbItem('m_beanie', '⭐ Striped Beanie (real model)', 'beanie.glb', { width: 2 * hw(TOP - 0.42) + 0.12, top: TOP + 0.16, centerZ: 0, conform: 0.01 }, (g, pivot) => {
+    const sp = spring(40, 4);   // the pom-pom bobble wobbles
+    return { update(st) { pivot.rotation.z = sp.step(st.dt, 0, -st.drot.z * 0.01 + st.kick * 0.04) * 0.3; } };
+  }),
+  glbItem('m_miner', '⭐ Miner Helmet + Carbide Lamp (real model)', 'miners_helmet.glb', { width: 2 * hw(TOP - 0.5) + 0.42, top: TOP + 0.2, centerZ: 0.03, conform: 0.012 }, (g, pivot, whenReady) => {
+    // a flickering flame glow in the lamp
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex(), color: 0xffc46b, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    glow.scale.setScalar(0.32); g.add(glow);
+    const light = new THREE.PointLight(0xffb45a, 0.6, 3); g.add(light);
+    // the lamp is the part of the helmet that sticks out furthest at the front
+    whenReady(inner => { const b = boxIn(inner, g); glow.position.set(0, b.max.y - (b.max.y - b.min.y) * 0.32, b.max.z + 0.02); light.position.copy(glow.position); });
+    return { update(st) { const f = 0.75 + 0.15 * Math.sin(st.t * 23) + 0.1 * Math.sin(st.t * 57 + 1.3); glow.material.opacity = f; glow.scale.setScalar(0.28 + 0.06 * f); light.intensity = 0.5 * f; } };
+  }),
+  glbItem('m_viking', '⭐ Viking Helmet (real model)', 'viking_helmet.glb', { width: 2.25, top: TOP + 0.42, centerZ: 0, conform: 0.012 }),
+  glbItem('m_pilot', '⭐ Leather Pilot Helmet (real model)', 'pilot_helmet.glb', { keep: o => !/glass/i.test(o.name), width: 2 * hw(EAR_Y) + 0.18, top: TOP + 0.08, centerZ: 0.02, conform: 0.012 }),
+  glbItem('m_fedora', '⭐ Panama Fedora (real model)', 'fedora.glb', { width: 1.95, top: TOP + 0.28, centerZ: 0, conform: 0.012 }, hatBounce(1)),
+  glbItem('m_cowboy', '⭐ Cowboy Hat (real model)', 'cowboy_hat.glb', { width: 2.3, top: TOP + 0.3, centerZ: 0, conform: 0.012 }, hatBounce(1.3)),
+  glbItem('m_welder', '⭐ Welding Mask (V flips it up)', 'welding_mask.glb', { width: 2 * hw(EAR_Y) + 0.1, top: TOP + 0.12, centerZ: 0.12, conform: 0.015 }, (g, pivot, whenReady) => {
+    const hinge = new THREE.Vector3(0, EAR_Y + 0.08, 0); let a = 0;
+    whenReady(inner => { pivot.position.copy(hinge); inner.position.sub(hinge); });
+    return { update(st) { a += ((st.visorDown ? 0 : -1.55) - a) * Math.min(1, st.dt * 6); pivot.rotation.x = a; } };
+  }),
+];
+const MODEL_FACE2 = [
+  glbItem('m_skimask', '⭐ Ski Mask Balaclava (real model)', 'ski_balaclava.glb', { width: 2 * hw(EAR_Y) + 0.06, yScale: 0.72, top: TOP - 0.04, centerZ: 0.02, conform: 0.008,
+    recolor: m => { m.color.set(0x2a2b28); } }),
+];
+let _glowTex = null;
+function glowTex() { if (_glowTex) return _glowTex; const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d');
+  const gr = x.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.3, 'rgba(255,220,150,0.6)'); gr.addColorStop(1, 'rgba(255,160,60,0)');
+  x.fillStyle = gr; x.fillRect(0, 0, 64, 64); _glowTex = new THREE.CanvasTexture(c); _glowTex.userData.shared = true; return _glowTex; }
+
+// gear clipped onto the body/vest: each part sits on the body at a height + angle and faces outwards
+function kitItem(id, name, parts) {
+  return { id, name, build() {
+    const g = new THREE.Group(), live = [];
+    for (const p of parts) {
+      const mount = new THREE.Group(), pos = ringPoint(p.y, p.a, 0), out = new THREE.Vector3(pos.x, 0, pos.z).normalize();
+      mount.position.copy(pos); mount.lookAt(pos.clone().add(out)); g.add(mount);
+      const hang = new THREE.Group(); hang.position.y = p.hangTop || 0; mount.add(hang);
+      const holder = new THREE.Group(); holder.position.y = -(p.hangTop || 0); holder.rotation.set(...(p.rot || [0, 0, 0])); hang.add(holder);
+      const L = { mount, hang, out, base: p.out || 0.03, sp: p.swing ? spring(p.swing, 3) : null, spz: p.swing ? spring(p.swing, 3) : null, ready: false };
+      live.push(L);
+      loadGLB(p.file).then(src => {
+        const model = src.clone(true);
+        if (p.keep) { const drop = []; model.traverse(o => { if (o.isMesh && !p.keep(o)) drop.push(o); }); drop.forEach(o => o.parent.remove(o)); }
+        model.traverse(o => { if (o.isMesh) { o.material = Array.isArray(o.material) ? o.material.map(m => m.clone()) : o.material.clone(); o.frustumCulled = false; if (p.recolor) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => p.recolor(m)); } });
+        const inner = new THREE.Group(); inner.add(model); holder.add(inner);
+        if (p.alongX) { const sz = boxIn(model, inner).getSize(new THREE.Vector3()), d = [sz.x, sz.y, sz.z], Lx = d.indexOf(Math.max(...d));
+          const rest = [0, 1, 2].filter(i => i !== Lx), T = d[rest[0]] < d[rest[1]] ? rest[0] : rest[1];
+          const ax = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)], ey = new THREE.Vector3().crossVectors(ax[T], ax[Lx]);
+          model.quaternion.premultiply(new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(ax[Lx], ey, ax[T]).invert())); }
+        let box = boxIn(inner, holder); const size = box.getSize(new THREE.Vector3());
+        const k = p.size / Math.max(size.x, size.y, size.z); inner.scale.setScalar(k);
+        const b2 = boxIn(inner, holder), c = b2.getCenter(new THREE.Vector3());   // centre it, back face on the mount point
+        inner.position.set(-c.x, -c.y, -b2.min.z);
+        L.ready = true;
+      }).catch(e => console.error('Could not load model', p.file, e));
+    }
+    return { obj: g, update(st) {
+      for (const L of live) {
+        const off = L.base + (st.vest ? 0.14 : 0); L.cur = L.cur === undefined ? off : L.cur + (off - L.cur) * Math.min(1, st.dt * 10);
+        L.hang.position.z = L.cur;
+        if (L.sp) { L.hang.rotation.x = L.sp.step(st.dt, 0, -st.drot.x * 0.03 + st.kick * 0.4); L.hang.rotation.z = L.spz.step(st.dt, 0, -st.drot.z * 0.05 - st.drot.y * 0.03); }
+      }
+    } };
+  } };
+}
+const GREEN_KIT = m => { if (m.color) m.color.multiplyScalar(0.95); };
+const MODEL_KIT = [
+  kitItem('k_ifak_nades', '⭐ IFAK + 2 F1 Grenades (real models)', [
+    { file: 'ifak.glb', size: 0.75, y: by(-0.9), a: 0.45, out: 0.03 },
+    { file: 'grenade_f1.glb', size: 0.55, y: by(-0.92), a: -0.25, out: 0.03, hangTop: 0.12, swing: 60 },
+    { file: 'grenade_f1.glb', size: 0.55, y: by(-0.92), a: -0.55, out: 0.03, hangTop: 0.12, swing: 55 },
+  ]),
+  kitItem('k_knife', '⭐ Tactical Knife on Chest (real model)', [
+    { file: 'knife.glb', size: 0.75, y: by(-0.55), a: -0.35, out: 0.03, alongX: true, rot: [0, 0, Math.PI / 2 + 0.25] },
+  ]),
+  kitItem('k_light', '⭐ Tactical Flashlight on Shoulder (real model)', [
+    { file: 'flashlight.glb', size: 0.6, y: NECK_Y - 0.22, a: 0.7, out: 0.04, alongX: true, rot: [0, 0, -0.35] },
+  ]),
+  kitItem('k_makarov', '⭐ Makarov Pistol on Hip (real model)', [
+    { file: 'makarov.glb', size: 0.6, y: by(-1.0), a: 1.25, out: 0.03, rot: [0, 0, -1.25], hangTop: 0.15, swing: 45 },
+  ]),
+  kitItem('k_radio', '⭐ Emergency Radio on Chest (real model)', [
+    { file: 'radio.glb', size: 0.7, y: by(-0.5), a: 0.5, out: 0.03, keep: o => !/ground/i.test((Array.isArray(o.material) ? o.material[0] : o.material).name) },
+  ]),
+  kitItem('k_full', '⭐ Full Kit: IFAK, Nades, Knife, Pistol (real models)', [
+    { file: 'ifak.glb', size: 0.72, y: by(-0.9), a: 0.5, out: 0.03 },
+    { file: 'grenade_f1.glb', size: 0.52, y: by(-0.92), a: -0.3, out: 0.03, hangTop: 0.12, swing: 60 },
+    { file: 'grenade_f1.glb', size: 0.52, y: by(-0.92), a: -0.58, out: 0.03, hangTop: 0.12, swing: 55 },
+    { file: 'knife.glb', size: 0.7, y: by(-0.5), a: -0.4, out: 0.03, alongX: true, rot: [0, 0, Math.PI / 2 + 0.25] },
+    { file: 'makarov.glb', size: 0.58, y: by(-1.0), a: 1.3, out: 0.03, rot: [0, 0, -1.25], hangTop: 0.15, swing: 45 },
+  ]),
+];
+const MODEL_GUNS2 = [
+  glbItem('m_mp5', '⭐ MP5 Chest Sling (real model)', 'mp5.glb', { alongX: true, length: 1.35, centerY: 0, centerZ: 0 }, slingExtraLen(1, 1.35)),
+  glbItem('m_dbarrel', '⭐ Double Barrel Shotgun Chest Sling (real model)', 'double_barrel.glb', { alongX: true, keep: o => !/shell/i.test((Array.isArray(o.material) ? o.material[0] : o.material).name), length: 1.85, centerY: 0, centerZ: 0 }, slingExtraLen(-1, 1.85)),
+  glbItem('m_sawedoff', '⭐ Sawed-Off Shotgun Chest Sling (real model)', 'sawed_off.glb', { alongX: true, length: 1.15, centerY: 0, centerZ: 0 }, slingExtraLen(1, 1.15)),
+];
+function slingExtraLen(side, len) { return (g, pivot, whenReady) => chestSling(g, pivot, side, len, whenReady); }
+const MODEL_PACK = [
+  glbItem('m_backpack', '⭐ Day Pack (real model)', 'backpack.glb', { width: 1.3, top: NECK_Y + 0.12, front: ringPoint(by(-0.6), Math.PI, 0).z + 0.42, rot: [0, Math.PI, 0],
+    recolor: m => { m.map = null; m.color.set(0x5d5f45); m.roughness = 0.9; m.metalness = 0; } }, (g, pivot, whenReady) => {
+    // shoulder straps coming over the shoulders to the chest, like a real pack
+    const strapMat = std(0x4b4d38, { roughness: 0.95 });
+    for (const sx of [-1, 1]) { const pts = [ringPoint(NECK_Y - 0.25, Math.PI - sx * 0.45, 0.02), ringPoint(NECK_Y - 0.04, sx * 2.0, 0.03), ringPoint(NECK_Y - 0.12, sx * 1.05, 0.03),
+      ringPoint(by(-0.7), sx * 0.6, 0.03), ringPoint(by(-0.98), sx * 1.0, 0.03), ringPoint(by(-1.05), sx * 1.8, 0.03)];
+      const st = ribbon(pts, 0.11, strapMat, 0.02); g.add(st); conformSoft(st, 0.02); }
+    const sp = spring(30, 3);
+    return { update(st) { pivot.rotation.x = sp.step(st.dt, 0, st.drot.x * 0.02 + st.kick * 0.15) * 0.25; } };
+  }),
 ];
 
 const NECK_IDS = ['chain', 'bowtie', 'scarf'];
@@ -1747,21 +1866,24 @@ export const SLOTS = [
   { id: 'hair', name: 'Hair', anchor: 'head' }, { id: 'head', name: 'Head', anchor: 'head' }, { id: 'beard', name: 'Beard', anchor: 'head' },
   { id: 'stache', name: 'Mustache', anchor: 'head' }, { id: 'face', name: 'Face', anchor: 'head' },
   { id: 'eyes', name: 'Eyewear', anchor: 'head' }, { id: 'ears', name: 'Ears', anchor: 'head' },
-  { id: 'neck', name: 'Neck', anchor: 'waist' }, { id: 'body', name: 'Body', anchor: 'waist' }, { id: 'belt', name: 'Belt', anchor: 'hip' }, { id: 'back', name: 'Back', anchor: 'waist' }
+  { id: 'neck', name: 'Neck', anchor: 'waist' }, { id: 'body', name: 'Body', anchor: 'waist' }, { id: 'belt', name: 'Belt', anchor: 'hip' }, { id: 'kit', name: 'Kit', anchor: 'waist' }, { id: 'back', name: 'Rifle / Back', anchor: 'waist' }, { id: 'pack', name: 'Backpack', anchor: 'waist' }
 ];
 const ITEMS_RAW = [
   ...HAIRDOS2.map(i => ({ ...i, slot: 'hair' })), ...BEARDS2.map(i => ({ ...i, slot: 'beard' })), ...STACHES2.map(i => ({ ...i, slot: 'stache' })),
-  ...[...MODEL_HEAD, ...MIL_HEAD, ...TK_HEAD, ...LOGO_HEAD, ...HEAD].map(i => ({ ...i, slot: 'head' })), ...[...MIL_FACE, ...TK_FACE].map(i => ({ ...i, slot: 'face' })),
+  ...[...MODEL_HEAD, ...MODEL_HEAD2, ...MIL_HEAD, ...TK_HEAD, ...LOGO_HEAD, ...HEAD].map(i => ({ ...i, slot: 'head' })), ...[...MODEL_FACE2, ...MIL_FACE, ...TK_FACE].map(i => ({ ...i, slot: 'face' })),
   ...[...MODEL_EYES, ...EYES, ...MIL_EYES, ...TK_EYES].map(i => ({ ...i, slot: 'eyes' })), ...[...MODEL_EARS, ...EARS, ...TK_EARS].map(i => ({ ...i, slot: 'ears' })),
   ...[...BODY.filter(i => NECK_IDS.includes(i.id)), ...MIL_NECK, ...TK_NECK].map(i => ({ ...i, slot: 'neck' })),
   ...[...MODEL_BODY, ...BODY.filter(i => !NECK_IDS.includes(i.id)), ...MIL_BODY, ...TK_BODY].map(i => ({ ...i, slot: 'body' })),
-  ...[...MODEL_BACK, ...MIL_BACK, ...TK_BACK].map(i => ({ ...i, slot: 'back' })), ...LOGO_BELT.map(i => ({ ...i, slot: 'belt' }))
+  ...[...MODEL_BACK, ...MODEL_GUNS2, ...MIL_BACK, ...TK_BACK].map(i => ({ ...i, slot: 'back' })), ...LOGO_BELT.map(i => ({ ...i, slot: 'belt' })),
+  ...MODEL_KIT.map(i => ({ ...i, slot: 'kit' })), ...MODEL_PACK.map(i => ({ ...i, slot: 'pack' }))
 ];
-const SOFT_SLOTS = new Set(['head', 'face', 'eyes', 'ears', 'neck', 'body', 'belt']);
+const SOFT_SLOTS = new Set(['head', 'face', 'eyes', 'ears', 'neck', 'body', 'belt']);   // kit/pack/guns are rigid
 const NO_CONFORM = new Set(['fishbowl']);
+const PACK_IDS = new Set(['pilgrim', 'blackjack', 'trizip', 'scav', 'radio']);
+for (const it of ITEMS_RAW) if (it.slot === 'back' && PACK_IDS.has(it.id)) it.slot = 'pack';
 export const ITEMS = ITEMS_RAW.map(it => ({ ...it, build() {
   const b = it.build(); finishModel(b.obj);
-  if (SOFT_SLOTS.has(it.slot) && !NO_CONFORM.has(it.id) && !it.id.startsWith('m_')) conformSoft(b.obj, 0.01);
+  if (SOFT_SLOTS.has(it.slot) && !NO_CONFORM.has(it.id) && !it.id.startsWith('m_') && !it.id.startsWith('k_')) conformSoft(b.obj, 0.01);
   return b;
 } }));
-export const DEFAULT_OUTFIT = { hair: 'none', beard: 'none', stache: 'none', head: 'none', face: 'none', eyes: 'none', ears: 'none', neck: 'none', body: 'none', belt: 'none', back: 'none' };
+export const DEFAULT_OUTFIT = { hair: 'none', beard: 'none', stache: 'none', head: 'none', face: 'none', eyes: 'none', ears: 'none', neck: 'none', body: 'none', belt: 'none', kit: 'none', back: 'none', pack: 'none' };
