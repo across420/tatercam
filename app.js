@@ -3,6 +3,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { FaceLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 import { buildTater, RealFace, CartoonFace, OneEuro, TOP, BONE_Y } from './tater.js';
 import { SLOTS, ITEMS, DEFAULT_OUTFIT, CUSTOM, CREDITS } from './wardrobe.js';
+import { initStreamAlerts } from './streamalerts.js';
 
 // ---------- Saved settings ----------
 const store = {
@@ -295,6 +296,20 @@ if (store.get('uiHidden', false)) { ui.classList.add('hidden'); wardrobe.classLi
 if (store.get('wardrobeHidden', isPhone)) wardrobe.classList.add('hidden');
 let hopY = 0, hopV = 0, squash = 0, spinT = -1, kick = 0, visorDown = store.get('visorDown', false), nvgDown = false;
 
+// ---------- Streamlabs: subs / tips / bits change the outfit ----------
+const alerts = initStreamAlerts({
+  ITEMS, SLOTS, store,
+  getOutfit: () => ({ ...outfit }),
+  setOutfit: o => { for (const s of SLOTS) { const id = o[s.id] || 'none'; if ((worn[s.id] && worn[s.id].id) !== id) equip(s.id, id); } },
+  react: kind => {
+    if (kind === 'hop' || kind === 'party') { if (hopY === 0) hopV = 4.2; }
+    if (kind === 'spin' && spinT < 0) spinT = 0;
+    if (kind === 'steam' || kind === 'party') for (let i = 0; i < 14; i++) spawnPuff(2.2);
+    if (kind === 'party') setTimeout(() => { if (spinT < 0) spinT = 0; }, 700);
+  },
+  openButton: document.getElementById('alertsBtn'),
+});
+
 addEventListener('keydown', e => {
   if (['SELECT', 'INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
   const k = e.key.toLowerCase();
@@ -311,8 +326,10 @@ addEventListener('keydown', e => {
   if (k === 'h') {
     const hide = !ui.classList.contains('hidden');
     ui.classList.toggle('hidden', hide); wardrobe.classList.toggle('hidden', hide || store.get('wardrobeHidden', isPhone));
+    if (hide) alerts.toggle(false);
     store.set('uiHidden', hide);
   }
+  if (k === 'a') alerts.toggle();
   if (k === 'f') { try { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); } catch {} }
 });
 

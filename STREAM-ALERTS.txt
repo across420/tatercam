@@ -1,0 +1,20 @@
+TaterCam + Streamlabs: subs, tips, bits and raids change the tater's outfit
+==========================================================================
+
+1. Open TaterCam and click "Stream alerts" (or press A).
+2. In Streamlabs (streamlabs.com dashboard): Settings -> API Tokens -> copy "Your Socket API Token".
+   Paste it into TaterCam and click Connect. The dot turns green when it's linked.
+   Keep this token secret - press H to hide all panels before you go live.
+3. Each rule says: which alert, the minimum amount, what changes, a reaction, and for how long.
+   The rule with the biggest minimum that an alert reaches is used.
+   "for 60 sec" = your own outfit comes back after 60 seconds (0 = keep the new outfit).
+4. Actions:
+   - Random full outfit          - Random item (any slot)       - Random item in one slot (e.g. Head)
+   - One of my saved outfits     - Viewer picks it in their message ("cowboy hat!", "viking helmet")
+   - Reaction only (no outfit change)
+5. Save outfits: dress the tater in the Wardrobe, type a name under "Saved outfits", click Save current.
+6. Press Test on any rule to see it happen without a real alert.
+7. "Show a thank-you banner" puts a "NAME subscribed! Tater is now wearing ..." banner on the green screen.
+
+Works with Twitch, YouTube and Streamlabs tips - anything Streamlabs sends alerts for.
+TaterCam talks straight to Streamlabs; nothing else needs to be installed.
